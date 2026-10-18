@@ -1,6 +1,6 @@
 # GitHub release setup
 
-WAMC distributes through `solvePao/wamc-releases` and mirrors the same APK, DMG, and metadata to the source repository’s Releases page. Apps continue checking `wamc-releases` for updates. Source is hosted in `solvePao/wamc`. The repository is public so GitHub branch protection is available on the current plan. No App Store or Play Store submission occurs.
+WAMC distributes signed APKs, notarized DMGs, and update metadata directly from the public `solvePao/wamc` repository. Both apps and the product website use that repository’s Releases page. No App Store or Play Store submission occurs.
 
 ## Apple credentials
 
@@ -28,7 +28,6 @@ Create environment **release** in `solvePao/wamc`. Configure these environment s
 | `NOTARY_KEY_ID` | API Key ID |
 | `NOTARY_ISSUER_ID` | API Issuer ID |
 | `SPARKLE_PRIVATE_KEY` | Private EdDSA key exported by Sparkle `generate_keys` |
-| `RELEASE_PUBLISH_TOKEN` | Fine-grained token restricted to `wamc-releases`, Contents read/write |
 
 Configure these environment variables:
 
@@ -56,7 +55,7 @@ The final command prompts for the password without placing it in command history
 2. Run `python3 scripts/testing/run_tests.py` locally and resolve any test or coverage failures. Both app gates require exact 100% production line coverage. Then run Build CI and review both platform builds; GitHub Actions does not execute tests.
 3. Merge the version/build change into `main`. Once the Build workflow succeeds, Release automatically prepares the matching `v<version>` tag at that exact commit and packages the unpublished version. An already published version is skipped. Release also supports manual dispatch and explicitly pushed matching version tags.
 4. Release CI signs the APK, signs and notarizes the Mac app and DMG, and signs the DMG for Sparkle.
-5. After both builds succeed, publication creates a draft in the public binary repository, uploads paired artifacts and update metadata, verifies its asset set, then publishes it. A separate job copies the verified assets into a release on `solvePao/wamc`, using that repository’s built-in Actions token. If mirroring fails, rerun the failed mirror job.
+5. After both builds succeed, publication creates a draft in the public source repository, uploads paired artifacts and update metadata, verifies its asset set, then publishes it. Publication uses the repository’s built-in Actions token with job-scoped Contents write permission.
 
 Failed builds publish nothing. A retry can resume an unpublished draft. Published versions are immutable; fix and increase the version/build rather than overwriting them. Update metadata is attached to the same release as the binaries. Avoid publishing an incomplete release manually: both apps follow the latest stable release.
 
@@ -70,9 +69,9 @@ Both apps check once per launch and prompt before download. Manual checks remain
 
 Validate an upgrade between two signed builds on a physical Android phone and Mac. Verify preserved settings, USB/Wi-Fi streams, camera extension readiness, checksum rejection, cancellation, and streaming deferral. Confirm public assets and feed are accessible anonymously.
 
-## Configured publisher credential
+## Update feed migration
 
-The repository-restricted WAMC release publisher token expires on November 17, 2026. Rotate `RELEASE_PUBLISH_TOKEN` in the release environment before that date. Its scope is `solvePao/wamc-releases` only, Contents read/write plus required Metadata read-only.
+The former `solvePao/wamc-releases` destination is unavailable. Versions before 0.2.2 use that old feed, so install 0.2.2 manually once to adopt the corrected source-repository feed. Later signed updates continue using the same Android and Sparkle keys. A separate publisher token is no longer required.
 
 ## Main branch protection
 

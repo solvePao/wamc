@@ -8,7 +8,7 @@ import re
 import xml.etree.ElementTree as ET
 from version import load_version
 
-REPOSITORY = 'solvePao/wamc-releases'
+REPOSITORY = 'solvePao/wamc'
 SPARKLE = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
 ET.register_namespace('sparkle', SPARKLE)
 

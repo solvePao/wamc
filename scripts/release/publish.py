@@ -8,11 +8,14 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from version import load_version
 
-REPOSITORY = 'solvePao/wamc-releases'
+REPOSITORY = 'solvePao/wamc'
 
 
 def run(*args):
-    return subprocess.run(['gh', *args], check=True, text=True, capture_output=True).stdout
+    try:
+        return subprocess.run(['gh', *args], check=True, text=True, capture_output=True).stdout
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(error.stderr.strip() or 'GitHub release command failed') from error
 
 
 def validate_previous(version, repository=REPOSITORY):
@@ -76,6 +79,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     parser.add_argument('--repository', default=REPOSITORY,
-                        choices=[REPOSITORY, 'solvePao/wamc'])
+                        choices=[REPOSITORY])
     arguments = parser.parse_args()
     publish(arguments.directory, arguments.repository)

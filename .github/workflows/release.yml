@@ -175,6 +175,8 @@ jobs:
           if [[ -n "${WAMC_SIGNING_KEYCHAIN:-}" ]]; then security delete-keychain "$WAMC_SIGNING_KEYCHAIN"; fi
           rm -rf "$RUNNER_TEMP/wamc-signing"
   publish:
+    permissions:
+      contents: write
     needs: [prepare, android, macos]
     runs-on: ubuntu-latest
     environment: release
@@ -189,28 +191,8 @@ jobs:
           path: release-dist
       - name: Generate metadata and publish paired release
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           test -n "$GH_TOKEN"
           python3 scripts/release/metadata.py release-dist --signature-file release-dist/sparkle-signature.txt
           python3 scripts/release/publish.py release-dist
-
-  mirror:
-    name: Publish source repository downloads
-    needs: [prepare, publish]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.commit }}
-      - name: Mirror verified release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-        run: |
-          mkdir -p release-dist
-          gh release download "$RELEASE_TAG" --repo solvePao/wamc-releases --dir release-dist
-          (cd release-dist && sha256sum --check SHA256SUMS)
-          python3 scripts/release/publish.py release-dist --repository solvePao/wamc
