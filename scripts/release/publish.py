@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import time
 from version import load_version
 
 REPOSITORY = 'solvePao/wamc'
@@ -57,6 +58,12 @@ def publish(directory, repository=REPOSITORY):
         run('release', 'create', tag, '--repo', repository, '--draft', '--title', f'WAMC {version["version"]}',
             '--notes', 'Signed Android APK and notarized Apple silicon macOS DMG. Source: https://github.com/solvePao/wamc.')
         existing = find_release(tag, repository)
+        # Newly created drafts can briefly be absent from GitHub's release list.
+        for _ in range(3):
+            if existing is not None:
+                break
+            time.sleep(2)
+            existing = find_release(tag, repository)
         if existing is None or not existing['draft']:
             raise ValueError('Expected the newly created draft release')
     run('release', 'upload', tag, '--repo', repository, '--clobber',
