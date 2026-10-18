@@ -22,7 +22,7 @@ final class SessionModel: ObservableObject {
     @Published private(set) var switching = false
     @Published private(set) var trustRequest: DiscoveredDevice?
     @Published var startsAutomatically: Bool {
-        didSet { UserDefaults.standard.set(startsAutomatically, forKey: Self.automaticKey) }
+        didSet { preferences.set(startsAutomatically, forKey: Self.automaticKey) }
     }
     private(set) var wantsStreaming = false
     var onStartCamera: (() -> Void)?
@@ -31,13 +31,14 @@ final class SessionModel: ObservableObject {
     var trustDevice: ((DiscoveredDevice) -> Void)?
 
     private static let automaticKey = "wamc.startStreamingAutomatically"
+    private let preferences: UserDefaults
     private let connection: ConnectionController
     private var operation = UUID()
     private var explicitlySelected = false
 
-    init(connection: ConnectionController) {
+    init(preferences: UserDefaults = .standard, connection: ConnectionController) {
+        self.preferences = preferences
         self.connection = connection
-        let preferences = UserDefaults.standard
         if let saved = preferences.object(forKey: Self.automaticKey) as? Bool {
             startsAutomatically = saved
         } else {

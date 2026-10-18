@@ -63,11 +63,25 @@ val androidProductionClasses = files(
         exclude("**/R.class", "**/R\$*.class", "**/BuildConfig.*", "**/Manifest*.*")
     }
 
-tasks.register<JacocoReport>("debugUnitTestCoverageReport") {
+val debugCoverageExecutionData = layout.buildDirectory.file(
+    "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec",
+)
+
+val validateDebugCoverageInputs = tasks.register("validateDebugCoverageInputs") {
     dependsOn("testDebugUnitTest")
-    executionData.setFrom(layout.buildDirectory.file(
-        "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec",
-    ))
+    doLast {
+        check(androidProductionClasses.files.any { it.extension == "class" }) {
+            "No production classes found for Android coverage"
+        }
+        check(debugCoverageExecutionData.get().asFile.let { it.isFile && it.length() > 0 }) {
+            "Missing or empty Android coverage execution data"
+        }
+    }
+}
+
+tasks.register<JacocoReport>("debugUnitTestCoverageReport") {
+    dependsOn(validateDebugCoverageInputs)
+    executionData.setFrom(debugCoverageExecutionData)
     sourceDirectories.setFrom(files("src/main/java"))
     classDirectories.setFrom(androidProductionClasses)
     reports {
@@ -78,10 +92,8 @@ tasks.register<JacocoReport>("debugUnitTestCoverageReport") {
 }
 
 tasks.register<JacocoCoverageVerification>("verifyDebugUnitTestCoverage") {
-    dependsOn("testDebugUnitTest")
-    executionData.setFrom(layout.buildDirectory.file(
-        "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec",
-    ))
+    dependsOn(validateDebugCoverageInputs)
+    executionData.setFrom(debugCoverageExecutionData)
     sourceDirectories.setFrom(files("src/main/java"))
     classDirectories.setFrom(androidProductionClasses)
 
@@ -89,8 +101,8 @@ tasks.register<JacocoCoverageVerification>("verifyDebugUnitTestCoverage") {
         rule {
             limit {
                 counter = "LINE"
-                value = "COVEREDRATIO"
-                minimum = "0.90".toBigDecimal()
+                value = "MISSEDCOUNT"
+                maximum = "0".toBigDecimal()
             }
         }
     }
@@ -101,8 +113,15 @@ tasks.named("check") {
 }
 
 tasks.withType<Test>().configureEach {
+    val workers = providers.gradleProperty("testWorkers").orElse("1").get().toInt()
+    require(workers > 0) { "testWorkers must be a positive integer" }
+    maxParallelForks = minOf(workers, Runtime.getRuntime().availableProcessors().coerceAtLeast(1))
+    if (providers.gradleProperty("forceTestExecution").orNull == "true") {
+        outputs.upToDateWhen { false }
+    }
     extensions.configure<JacocoTaskExtension> {
         isIncludeNoLocationClasses = true
+        includes = listOf("com.androidwebcam.app.*")
         excludes?.add("jdk.internal.*")
     }
 }

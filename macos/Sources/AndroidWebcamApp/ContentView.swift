@@ -2,6 +2,12 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var setup: SetupModel
+
+    init(model: AppModel) {
+        self.model = model
+        setup = model.setup
+    }
 
     var body: some View {
         GlassControlGroup {
@@ -51,30 +57,37 @@ struct ContentView: View {
                 }
             }
             ToolbarItemGroup(placement: .primaryAction) {
-                Button { model.setup.showSetup = true } label: {
+                Button(action: presentSetup) {
                     Label("Setup", systemImage: "gearshape")
                 }
                 .help("Setup & Diagnostics")
             }
         }
-        .sheet(isPresented: Binding(get: { model.setup.showSetup },
-                                    set: { model.setup.showSetup = $0 })) {
+        .sheet(isPresented: $setup.showSetup) {
             SetupView(model: model)
         }
-        .task {
-            if SetupModel.needsFirstRunSetup {
-                await Task.yield()
-                model.setup.showSetup = true
-            }
+        .task { await showFirstRunSetup() }
+        .onAppear(perform: showWindow)
+        .onDisappear(perform: hideWindow)
+    }
+
+    func presentSetup() { setup.showSetup = true }
+
+    func showFirstRunSetup() async {
+        if setup.requiresFirstRunSetup {
+            await Task.yield()
+            setup.showSetup = true
         }
-        .onAppear {
-            model.previewVisible = true
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-        }
-        .onDisappear {
-            model.previewVisible = false
-            NSApp.setActivationPolicy(.accessory)
-        }
+    }
+
+    func showWindow() {
+        model.previewVisible = true
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func hideWindow() {
+        model.previewVisible = false
+        NSApp.setActivationPolicy(.accessory)
     }
 }

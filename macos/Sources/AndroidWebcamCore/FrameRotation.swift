@@ -8,6 +8,11 @@ public enum FrameRotation {
     private static let context = CIContext(options: [.useSoftwareRenderer: false])
 
     public static func rotate(_ pixelBuffer: CVPixelBuffer, quarterTurns: Int) -> CVPixelBuffer {
+        rotate(pixelBuffer, quarterTurns: quarterTurns, makeOutput: makeOutput)
+    }
+
+    static func rotate(_ pixelBuffer: CVPixelBuffer, quarterTurns: Int,
+                       makeOutput: (Int, Int) -> CVPixelBuffer?) -> CVPixelBuffer {
         let turns = quarterTurns & 3
         guard turns != 0 else { return pixelBuffer }
         let width = CVPixelBufferGetWidth(pixelBuffer)
@@ -25,11 +30,14 @@ public enum FrameRotation {
         image = image.transformed(by: CGAffineTransform(
             translationX: -bounds.minX, y: -bounds.minY))
 
-        var output: CVPixelBuffer?
-        guard CVPixelBufferCreate(nil, outWidth, outHeight,
-                                  kCVPixelFormatType_32BGRA, nil, &output) == kCVReturnSuccess,
-              let output else { return pixelBuffer }
+        guard let output = makeOutput(outWidth, outHeight) else { return pixelBuffer }
         context.render(image, to: output)
         return output
+    }
+
+    private static func makeOutput(width: Int, height: Int) -> CVPixelBuffer? {
+        var output: CVPixelBuffer?
+        let status = CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, nil, &output)
+        return status == kCVReturnSuccess ? output : nil
     }
 }

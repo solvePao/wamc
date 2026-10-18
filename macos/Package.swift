@@ -18,6 +18,7 @@ let package = Package(
         .target(name: "AndroidWebcamCore", dependencies: ["AndroidWebcamProtocol"]),
         .target(
             name: "CameraExtensionRuntime",
+            dependencies: ["AndroidWebcamCore"],
             path: "CameraExtension",
             exclude: ["README.md", "project.yml", "CameraExtension-Info.plist", "CameraExtension.entitlements"],
             swiftSettings: [.define("WAMC_COVERAGE_TESTING")],

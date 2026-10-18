@@ -1,11 +1,26 @@
 import SwiftUI
 
+/// Allows previews and tests to render each supported system appearance.
+enum GlassRendering: Equatable { case native, standard, legacy }
+
+private struct GlassRenderingKey: EnvironmentKey {
+    static let defaultValue = GlassRendering.native
+}
+
+extension EnvironmentValues {
+    var wamcGlassRendering: GlassRendering {
+        get { self[GlassRenderingKey.self] }
+        set { self[GlassRenderingKey.self] = newValue }
+    }
+}
+
 /// Related glass controls share one sampling region on macOS 26 and later.
 struct GlassControlGroup<Content: View>: View {
+    @Environment(\.wamcGlassRendering) private var rendering
     @ViewBuilder var content: Content
 
     var body: some View {
-        if #available(macOS 26, *) {
+        if #available(macOS 26, *), rendering != .legacy {
             GlassEffectContainer(spacing: 12) { content }
         } else {
             content
@@ -14,11 +29,12 @@ struct GlassControlGroup<Content: View>: View {
 }
 
 private struct AdaptiveGlassSurface: ViewModifier {
+    @Environment(\.wamcGlassRendering) private var rendering
     var interactive = false
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(macOS 26, *) {
+        if #available(macOS 26, *), rendering != .legacy {
             content.glassEffect(interactive ? .regular.interactive() : .regular,
                                 in: RoundedRectangle(cornerRadius: 12))
         } else {
@@ -28,17 +44,18 @@ private struct AdaptiveGlassSurface: ViewModifier {
 }
 
 private struct AdaptiveActionStyle: ViewModifier {
+    @Environment(\.wamcGlassRendering) private var rendering
     let prominent: Bool
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(macOS 26.1, *), prominent {
+        if #available(macOS 26.1, *), prominent, rendering == .native {
             // Use the same native glass geometry for both columns. The
             // prominent style has different intrinsic insets on macOS.
             content.buttonStyle(.glass(.regular.tint(.accentColor)))
                 .buttonSizing(.flexible)
                 .frame(height: 36)
-        } else if #available(macOS 26, *) {
+        } else if #available(macOS 26, *), rendering != .legacy {
             content.buttonStyle(.glass)
                 .tint(prominent ? Color.accentColor : nil)
                 .buttonSizing(.flexible)

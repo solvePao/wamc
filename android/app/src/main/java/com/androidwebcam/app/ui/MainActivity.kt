@@ -37,6 +37,12 @@ import com.androidwebcam.app.util.UsbConfigHelper
 
 class MainActivity : Activity() {
 
+    internal var configureUsb: () -> Boolean = UsbConfigHelper::tryConfigureViaRoot
+    internal var launchUsbSettings: (Intent) -> Unit = { startActivity(it) }
+    internal var updateCoordinator: () -> com.androidwebcam.app.update.UpdateCoordinator = {
+        com.androidwebcam.app.update.AndroidUpdates.get(this)
+    }
+
     private lateinit var updates: com.androidwebcam.app.update.UpdatePresenter
     private var service: CameraStreamingService? = null
     private var previewSurface: Surface? = null
@@ -97,7 +103,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        updates = com.androidwebcam.app.update.UpdatePresenter(this, com.androidwebcam.app.update.AndroidUpdates.get(this))
+        updates = com.androidwebcam.app.update.UpdatePresenter(this, updateCoordinator())
         startAfterPermission = savedInstanceState?.getBoolean(STATE_PERMISSION_START) ?: false
         setContentView(R.layout.activity_main)
         stateBadge = findViewById(R.id.stateBadge)
@@ -192,7 +198,7 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.updateMenu)?.setOnClickListener { anchor ->
             android.widget.PopupMenu(this, anchor).apply {
                 menu.add("Check for Updates…").setOnMenuItemClickListener {
-                    com.androidwebcam.app.update.AndroidUpdates.get(this@MainActivity).check(manual = true)
+                    updateCoordinator().check(manual = true)
                     true
                 }
                 show()
@@ -212,7 +218,7 @@ class MainActivity : Activity() {
     /** Shared tap path: starts with the spinner's quality, flips the button. */
     private fun startStreamingFromUi() {
         val svc = service ?: return
-        if (svc.streaming || !hasCameraPermission() || com.androidwebcam.app.update.AndroidUpdates.get(this).installationInProgress) return
+        if (svc.streaming || !hasCameraPermission() || updateCoordinator().installationInProgress) return
         val spinner: Spinner? = findViewById(R.id.resolution)
         val (w, h, q) = when (spinner?.selectedItemPosition) {
             2 -> Triple(1280, 720, com.androidwebcam.app.camera.StreamQuality.BALANCED)
@@ -225,7 +231,7 @@ class MainActivity : Activity() {
 
     /** No-tap start on open / after grant / when re-enabled. */
     private fun maybeAutoStart() {
-        val updater = com.androidwebcam.app.update.AndroidUpdates.get(this)
+        val updater = updateCoordinator()
         if (!updater.installationInProgress && updater.state !is com.androidwebcam.app.update.UpdateState.Ready &&
             autoStartEnabled() && hasCameraPermission()) startStreamingFromUi()
     }
@@ -426,7 +432,7 @@ class MainActivity : Activity() {
         }
 
         // If device is rooted, attempt silent configuration and dismiss
-        if (UsbConfigHelper.tryConfigureViaRoot()) {
+        if (configureUsb()) {
             UsbConfigHelper.setSetupDismissed(this, true)
             Toast.makeText(this, R.string.usb_setup_configured_root, Toast.LENGTH_LONG).show()
             usbSetupCard.visibility = View.GONE
@@ -439,16 +445,16 @@ class MainActivity : Activity() {
             if (UsbConfigHelper.isDeveloperOptionsEnabled(this)) {
                 Toast.makeText(this, R.string.usb_dev_options_hint, Toast.LENGTH_LONG).show()
                 try {
-                    startActivity(UsbConfigHelper.createDeveloperOptionsIntent())
+                    launchUsbSettings(UsbConfigHelper.createDeveloperOptionsIntent())
                 } catch (_: ActivityNotFoundException) {
-                    startActivity(Intent(Settings.ACTION_SETTINGS))
+                    launchUsbSettings(Intent(Settings.ACTION_SETTINGS))
                 }
             } else {
                 Toast.makeText(this, R.string.usb_enable_dev_options_hint, Toast.LENGTH_LONG).show()
                 try {
-                    startActivity(UsbConfigHelper.createAboutPhoneIntent())
+                    launchUsbSettings(UsbConfigHelper.createAboutPhoneIntent())
                 } catch (_: ActivityNotFoundException) {
-                    startActivity(Intent(Settings.ACTION_SETTINGS))
+                    launchUsbSettings(Intent(Settings.ACTION_SETTINGS))
                 }
             }
         }

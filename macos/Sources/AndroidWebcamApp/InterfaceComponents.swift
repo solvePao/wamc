@@ -81,22 +81,28 @@ struct CameraControls: View, Equatable {
     }
 }
 
-#Preview("Camera controls · connected") {
-    GlassControlGroup {
-        CameraControls(connected: true, facingBack: false, quality: .best, setQuality: { _ in },
-                       switchCamera: {}, rotate: {})
-            .padding(20)
-            .frame(width: 320)
-            .preferredColorScheme(.light)
+struct ConnectedCameraControlsPreview: PreviewProvider {
+    static var previews: some View {
+        GlassControlGroup {
+            CameraControls(connected: true, facingBack: false, quality: .best, setQuality: { _ in },
+                           switchCamera: {}, rotate: {})
+                .padding(20)
+                .frame(width: 320)
+                .preferredColorScheme(.light)
+        }
+        .previewDisplayName("Camera controls · connected")
     }
 }
 
-#Preview("Camera controls · disconnected") {
-    GlassControlGroup {
-        CameraControls(connected: false, facingBack: false, quality: .best, setQuality: { _ in },
-                       switchCamera: {}, rotate: {})
-            .padding(20)
-            .frame(width: 320)
-            .preferredColorScheme(.dark)
+struct DisconnectedCameraControlsPreview: PreviewProvider {
+    static var previews: some View {
+        GlassControlGroup {
+            CameraControls(connected: false, facingBack: false, quality: .best, setQuality: { _ in },
+                           switchCamera: {}, rotate: {})
+                .padding(20)
+                .frame(width: 320)
+                .preferredColorScheme(.dark)
+        }
+        .previewDisplayName("Camera controls · disconnected")
     }
 }

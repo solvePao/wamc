@@ -56,19 +56,7 @@ struct PreviewPane: View {
 
             Divider()
 
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: model.virtualCameraActive ? "checkmark.circle.fill" : "exclamationmark.circle")
-                    .foregroundStyle(model.virtualCameraActive ? Color.green : Color.orange)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(model.virtualCameraActive ? "Virtual camera ready" : model.virtualCameraStatusText)
-                        .font(.callout.weight(.medium))
-                    Text("Select Android Camera in your meeting app.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
+            CameraHealthView(model: model)
 
             DisclosureGroup("Diagnostics", isExpanded: $showDiagnostics) {
                 ScrollView {
@@ -126,7 +114,10 @@ struct DisconnectedPreview: View {
     }
 }
 
-#Preview("Disconnected canvas") {
-    DisconnectedPreview()
-        .frame(width: 520, height: 380)
+struct DisconnectedCanvasPreview: PreviewProvider {
+    static var previews: some View {
+        DisconnectedPreview()
+            .frame(width: 520, height: 380)
+            .previewDisplayName("Disconnected canvas")
+    }
 }

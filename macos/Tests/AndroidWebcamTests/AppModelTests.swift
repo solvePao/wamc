@@ -10,7 +10,7 @@ import AndroidWebcamProtocol
 @MainActor
 final class AppModelTests: XCTestCase {
     func testDisconnectedCommandsAreNoOpsAndLabelsRemainSafe() {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
 
         XCTAssertFalse(model.canStartCamera)
         XCTAssertEqual(model.deviceLabel, "No phone detected")
@@ -24,7 +24,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testDiagnosticsIncludeProcessingSamplesAndWifiLatencyMode() throws {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
         var stats = StreamStats()
         stats.connectedSince = Date()
         stats.recordFrame(bytes: 256_000, isKeyframe: true)
@@ -35,7 +35,7 @@ final class AppModelTests: XCTestCase {
                                      port: 27183, version: 2)
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let connectedModel = AppModel(startServices: false, connection: connection)
+        let connectedModel = AppModel(preferences: isolatedDefaults(), startServices: false, connection: connection)
         let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: 27183)!)
         connection.connect(to: .wifi(phone), endpoint: endpoint, manual: true)
         connectedModel.diagnostics.stats = stats
@@ -50,7 +50,7 @@ final class AppModelTests: XCTestCase {
         let inventory = FakeDeviceInventory(devices: [
             AndroidDevice(id: "usb-1", model: "Galaxy", state: "device"),
         ], webcams: ["USB Webcam"])
-        let model = AppModel(startServices: false, deviceInventory: inventory)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false, deviceInventory: inventory)
         let refreshed = expectation(description: "inventory results reach the model")
         let fulfillmentLock = NSLock()
         var didFulfill = false
@@ -69,7 +69,7 @@ final class AppModelTests: XCTestCase {
         model.refreshDevices()
         await fulfillment(of: [refreshed], timeout: 1)
         withExtendedLifetime(observation) {}
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
 
         XCTAssertEqual(inventory.androidReads, 1)
         XCTAssertEqual(inventory.webcamReads, 1)
@@ -84,7 +84,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testManualAddressValidationAndSessionSnapshot() {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
 
         model.manualAddress = "  "
         model.useManualAddress()
@@ -106,7 +106,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testSelectedAndActiveWifiSourcesStayVisibleAndLabelsTrackTransport() throws {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
         let device = DiscoveredDevice(id: "phone-1", instanceName: "Galaxy", model: "Galaxy",
                                       brand: "Samsung", sdk: 35, port: 27183, version: 2)
         model.discoveredDevices = [device]
@@ -125,7 +125,7 @@ final class AppModelTests: XCTestCase {
     func testWifiConnectionPublishesActiveSessionAndClearsStateOnDisconnect() async throws {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = AppModel(startServices: false, connection: connection)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false, connection: connection)
         let device = DiscoveredDevice(id: "phone-1", instanceName: "Galaxy", model: "Galaxy",
                                       brand: "Samsung", sdk: 35, port: 27183, version: 2)
         model.selectSource(.wifi(device))
@@ -134,7 +134,7 @@ final class AppModelTests: XCTestCase {
         connection.connect(to: .wifi(device), endpoint: endpoint, manual: true)
         let attempt = try XCTUnwrap(transport.attempt)
         transport.emit(.hello(["model": "Galaxy", "id": "phone-1"]), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
 
         XCTAssertTrue(model.isSourceActive(.wifi(device)))
         XCTAssertEqual(model.transportLabel, "Wi-Fi")
@@ -153,7 +153,7 @@ final class AppModelTests: XCTestCase {
     func testWifiIdentityMismatchDisconnectsAndSurfacesActionableStatus() async throws {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = AppModel(startServices: false, connection: connection)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false, connection: connection)
         let expected = DiscoveredDevice(id: "advertised-phone", instanceName: "Galaxy", model: "Galaxy",
                                         brand: "Samsung", sdk: 35, port: 27183, version: 2)
         let endpoint = NWEndpoint.hostPort(host: .ipv4(.loopback),
@@ -162,7 +162,7 @@ final class AppModelTests: XCTestCase {
         connection.connect(to: .wifi(expected), endpoint: endpoint, manual: true)
         let attempt = try XCTUnwrap(transport.attempt)
         transport.emit(.hello(["model": "Other phone", "id": "different-phone"]), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
 
         XCTAssertFalse(model.connected)
         XCTAssertTrue(model.identityMismatch)
@@ -172,7 +172,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testQualityModesKeepLabelsAndDimensionsAligned() {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
         XCTAssertEqual(QualityMode.allCases.map(\.rawValue), ["best", "high", "balanced"])
         XCTAssertEqual(QualityMode.best.label, "Best · auto")
         XCTAssertEqual(QualityMode.high.label, "1080p · high")
@@ -190,7 +190,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testTrustControlsAndDiscoveryMenuStatusStayInSync() {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
         let phone = DiscoveredDevice(id: "coverage-phone-9281", instanceName: "Pixel",
                                      model: "Pixel", brand: "Google", sdk: 35,
                                      port: 27183, version: 2)
@@ -211,13 +211,13 @@ final class AppModelTests: XCTestCase {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
         let decoder = FakeH264Decoder()
-        let model = AppModel(startServices: false, connection: connection, decoder: decoder)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false, connection: connection, decoder: decoder)
         let target = ConnectionTarget.address("127.0.0.1", 27183)
         connection.connect(to: target, manual: true)
         let attempt = try XCTUnwrap(transport.attempt)
 
         transport.emit(.hello(["model": "Test phone", "gen": "generation-1"]), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertTrue(model.connected)
         XCTAssertEqual(model.deviceLabel, "Test phone")
         XCTAssertEqual(model.transportLabel, "Wi-Fi")
@@ -231,12 +231,12 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(transport.sentControls.suffix(2).map { $0.first?.1 }, ["setFacing", "rotate"])
 
         transport.emit(.hello(["model": "Test phone", "gen": "generation-2"]), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         let configPayload = WireProtocol.encodeConfig(sps: Data(), pps: Data(), width: 1920,
                                                       height: 1080, fps: 30)
         let config = try XCTUnwrap(WireProtocol.decodeConfig(configPayload))
         transport.emit(.config(config), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(model.stats.decodeErrors, 1)
         XCTAssertEqual(model.codecLabel, "H.264")
 
@@ -244,19 +244,19 @@ final class AppModelTests: XCTestCase {
             transport.emit(.video(Data([0, 0, 1, 0x65]), Int64(pts), pts == 0),
                            attempt: attempt)
         }
-        try await Task.sleep(nanoseconds: 40_000_000)
+        await drainMainQueue()
         XCTAssertEqual(decoder.decodeCount, 121)
 
         let hevc = WireProtocol.ConfigV2(codec: WireProtocol.codecHEVC, paramSets: [],
                                          width: 1280, height: 720, fps: 30, rotation: 1)
         transport.emit(.configV2(hevc), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(model.codecLabel, "HEVC")
         XCTAssertEqual(model.rotationQuarterTurns, 1)
         XCTAssertEqual(model.stats.decodeErrors, 2)
 
         transport.emit(.config(config), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(model.stats.decodeErrors, 2, "Legacy CONFIG is ignored after CONFIG_V2 negotiation")
 
         connection.disconnect()
@@ -270,32 +270,32 @@ final class AppModelTests: XCTestCase {
         let bridge = ExtensionBridge(sink: sink, now: { 10 })
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = AppModel(startServices: false, connection: connection,
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false, connection: connection,
                              decoder: decoder, extensionBridge: bridge)
         let target = ConnectionTarget.address("127.0.0.1", 27183)
         connection.connect(to: target, manual: true)
         let attempt = try XCTUnwrap(transport.attempt)
         transport.emit(.hello(["model": "Phone", "gen": "first"]), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         model.sendStart()
         transport.emit(.hello(["model": "Phone", "gen": "second"]), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
 
         let config = WireProtocol.ConfigV2(codec: WireProtocol.codecAVC,
                                           paramSets: [Data([0x67]), Data([0x68])],
                                           width: 1920, height: 1080, fps: 30, rotation: 0)
         transport.emit(.configV2(config), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         let context = try XCTUnwrap(decoder.configuredContexts.last)
         decoder.emitFrame(try makePixelBuffer(), ptsUs: 1, context: context)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        try await waitUntil("decoded frame reaches the bridge") { model.feedState == .live && sink.enqueueCount == 1 }
 
         XCTAssertEqual(model.feedState, .live)
         XCTAssertEqual(sink.enqueueCount, 1)
         XCTAssertEqual(model.codecLabel, "H.264")
 
         decoder.emitError(context: context)
-        try await Task.sleep(nanoseconds: 30_000_000)
+        await drainMainQueue()
         XCTAssertEqual(model.stats.decodeErrors, 1)
         XCTAssertEqual(transport.sentControls.last?.first?.1, "requestKeyframe")
 
@@ -304,7 +304,7 @@ final class AppModelTests: XCTestCase {
                                                width: 1280, height: 720, fps: 30, rotation: 1)
         transport.emit(.configV2(nextConfig), attempt: attempt)
         decoder.emitError(context: context)
-        try await Task.sleep(nanoseconds: 30_000_000)
+        await drainMainQueue()
         XCTAssertEqual(model.stats.decodeErrors, 1, "A delayed decoder callback from an old config is ignored")
     }
 
@@ -313,7 +313,7 @@ final class AppModelTests: XCTestCase {
         let sink = AppModelTestExtensionSink()
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = AppModel(startServices: false, connection: connection, decoder: decoder,
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false, connection: connection, decoder: decoder,
                              extensionBridge: ExtensionBridge(sink: sink, now: { 10 }))
         model.previewVisible = false
         connection.connect(to: .address("127.0.0.1", 27183), manual: true)
@@ -368,12 +368,12 @@ final class AppModelTests: XCTestCase {
     func testWifiAdvertisementsReachModelAndForgettingConnectedPhoneStopsSession() async throws {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = AppModel(startServices: false, connection: connection)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false, connection: connection)
         let advertisement = WifiAdvertisement(instanceName: "Coverage phone",
             txt: ["id": "coverage-forget-phone", "model": "Phone", "v": "2", "port": "27183"],
             endpoint: .hostPort(host: "127.0.0.1", port: 27183))
         model.wifiDiscovery.apply([advertisement])
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         let phone = try XCTUnwrap(model.discoveredDevices.first)
         XCTAssertEqual(model.wifiStatusText, "Found 1 phone(s) on Wi-Fi")
         XCTAssertEqual(model.wifiDiscovery.endpoint(for: phone), advertisement.endpoint)
@@ -381,27 +381,14 @@ final class AppModelTests: XCTestCase {
         connection.connect(to: .wifi(phone), endpoint: advertisement.endpoint, manual: true)
         let attempt = try XCTUnwrap(transport.attempt)
         transport.emit(.hello(["model": "Phone", "id": phone.id]), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertTrue(model.connected)
         model.forgetDevice(phone)
         XCTAssertFalse(model.connected)
         XCTAssertFalse(model.isTrusted(phone))
         model.wifiDiscovery.apply([])
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertTrue(model.discoveredDevices.isEmpty)
-    }
-
-    private func waitUntil(_ description: String, timeout: TimeInterval = 3,
-                           condition: () -> Bool) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(timeout))
-        while !condition() {
-            guard clock.now < deadline else {
-                XCTFail(description)
-                throw NSError(domain: "AppModelTests.waitUntil", code: 1)
-            }
-            try await Task.sleep(nanoseconds: 10_000_000)
-        }
     }
 
     private func makePixelBuffer() throws -> CVPixelBuffer {

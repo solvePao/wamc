@@ -123,6 +123,16 @@ class WireProtocolTest {
         assertEquals(false, first == different)
     }
 
+    @Test fun omittedConfigRotationsDefaultToZero() {
+        val sps = byteArrayOf(0x67)
+        val pps = byteArrayOf(0x68)
+        val legacy = WireProtocol.Config(sps, pps, 640, 480, 30)
+        assertEquals(legacy.rotation, WireProtocol.decodeConfig(
+            WireProtocol.encodeConfig(sps, pps, 640, 480, 30)).rotation)
+        val modern = WireProtocol.ConfigV2(0, listOf(sps, pps), 640, 480, 30)
+        assertEquals(0, modern.rotation)
+    }
+
     private inline fun <reified T : Throwable> assertThrows(noinline block: () -> Unit) {
         try {
             block()

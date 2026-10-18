@@ -1,14 +1,13 @@
+#if WAMC_COVERAGE_TESTING
+import AndroidWebcamCore
+#endif
 import Foundation
 import CoreMediaIO
 import CoreVideo
 import OSLog
 
-private func makeFormat() -> CMIOExtensionStreamFormat? {
-    var description: CMVideoFormatDescription?
-    let status = CMVideoFormatDescriptionCreate(
-        allocator: kCFAllocatorDefault, codecType: CMVideoCodecType(0x4247_5241), // 'BGRA'
-        width: 1920, height: 1080, extensions: nil,
-        formatDescriptionOut: &description)
+func makeFormat(factory: CameraMediaCreating = CameraMediaFactory()) -> CMIOExtensionStreamFormat? {
+    let (status, description) = factory.streamFormat()
     guard status == noErr, let description else {
         ExtensionLogger.runtime.error("Creating camera stream format failed with OSStatus \(status, privacy: .public)")
         return nil
@@ -20,15 +19,14 @@ private func makeFormat() -> CMIOExtensionStreamFormat? {
         validFrameDurations: nil)
 }
 
-private func makeSample(from pixelBuffer: CVPixelBuffer,
-                        format: CMFormatDescription?,
-                        hostTime: CMTime) -> CMSampleBuffer? {
+func makeSample(from pixelBuffer: CVPixelBuffer,
+                format: CMFormatDescription?, hostTime: CMTime,
+                factory: CameraMediaCreating = CameraMediaFactory()) -> CMSampleBuffer? {
     var resolved = format
-    if resolved == nil {
-        var created: CMVideoFormatDescription?
-        let status = CMVideoFormatDescriptionCreateForImageBuffer(
-            allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer,
-            formatDescriptionOut: &created)
+    // Color and layout attachments can differ between decoded and placeholder
+    // buffers, even when both use the advertised BGRA dimensions.
+    if resolved.map({ CMVideoFormatDescriptionMatchesImageBuffer($0, imageBuffer: pixelBuffer) }) != true {
+        let (status, created) = factory.imageFormat(pixelBuffer)
         guard status == noErr else {
             ExtensionLogger.runtime.error("Creating camera image format failed with OSStatus \(status, privacy: .public)")
             return nil
@@ -36,15 +34,7 @@ private func makeSample(from pixelBuffer: CVPixelBuffer,
         resolved = created
     }
     guard let resolved else { return nil }
-    var timing = CMSampleTimingInfo(
-        duration: CMTime(value: 1, timescale: 30),
-        presentationTimeStamp: hostTime,
-        decodeTimeStamp: .invalid)
-    var sample: CMSampleBuffer?
-    let status = CMSampleBufferCreateForImageBuffer(
-        allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer, dataReady: true,
-        makeDataReadyCallback: nil, refcon: nil, formatDescription: resolved,
-        sampleTiming: &timing, sampleBufferOut: &sample)
+    let (status, sample) = factory.sampleBuffer(pixelBuffer, format: resolved, hostTime: hostTime)
     guard status == noErr else {
         ExtensionLogger.runtime.error("Creating camera sample buffer failed with OSStatus \(status, privacy: .public)")
         return nil
@@ -52,19 +42,18 @@ private func makeSample(from pixelBuffer: CVPixelBuffer,
     return sample
 }
 
-private let cachedPlaceholder: CVPixelBuffer? = {
-    var buffer: CVPixelBuffer?
-    guard CVPixelBufferCreate(nil, 1920, 1080, kCVPixelFormatType_32BGRA,
-                             [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
-                             &buffer) == kCVReturnSuccess,
-          let buffer else { return nil }
+func makePlaceholder(factory: CameraMediaCreating = CameraMediaFactory()) -> CVPixelBuffer? {
+    let (status, buffer) = factory.placeholderBuffer()
+    guard status == kCVReturnSuccess, let buffer else { return nil }
     CVPixelBufferLockBaseAddress(buffer, [])
     defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
     if let base = CVPixelBufferGetBaseAddress(buffer) {
         memset(base, 24, CVPixelBufferGetDataSize(buffer)) // "waiting for phone" slate
     }
     return buffer
-}()
+}
+
+private let cachedPlaceholder = makePlaceholder()
 
 protocol CameraFrameProviding {
     func sample(format: CMFormatDescription?, hostTime: CMTime) -> CMSampleBuffer?
@@ -76,13 +65,22 @@ protocol ExtensionSamplePublishing: AnyObject {
 
 struct SharedCameraFrameProvider: CameraFrameProviding {
     private let sharedFrame: SharedFrame
+    private let placeholder: CVPixelBuffer?
 
-    init(sharedFrame: SharedFrame = .shared) { self.sharedFrame = sharedFrame }
+    init(sharedFrame: SharedFrame = .shared, placeholder: CVPixelBuffer? = cachedPlaceholder) {
+        self.sharedFrame = sharedFrame
+        self.placeholder = placeholder
+    }
 
     func sample(format: CMFormatDescription?, hostTime: CMTime) -> CMSampleBuffer? {
-        let pixels = sharedFrame.latestFresh(within: 1.0) ?? cachedPlaceholder
-        guard let pixels else { return nil }
-        return makeSample(from: pixels, format: format, hostTime: hostTime)
+        let frame = sharedFrame.freshFrame(within: 1.0)
+        guard let pixels = frame?.pixels ?? placeholder,
+              let sample = makeSample(from: pixels, format: format, hostTime: hostTime) else { return nil }
+        if let frame {
+            CMSetAttachment(sample, key: CameraHealthSnapshot.liveSequenceAttachment as CFString,
+                            value: NSNumber(value: frame.sequence), attachmentMode: kCMAttachmentMode_ShouldNotPropagate)
+        }
+        return sample
     }
 }
 
@@ -91,7 +89,13 @@ private final class CMIOExtensionSamplePublisher: ExtensionSamplePublishing {
     init(stream: CMIOExtensionStream) { self.stream = stream }
 
     func send(_ sample: CMSampleBuffer, hostTimeNanoseconds: UInt64) {
-        stream?.send(sample, discontinuity: [], hostTimeInNanoseconds: hostTimeNanoseconds)
+        guard let stream else { return }
+        stream.send(sample, discontinuity: [], hostTimeInNanoseconds: hostTimeNanoseconds)
+        if let sequence = CMGetAttachment(sample,
+            key: CameraHealthSnapshot.liveSequenceAttachment as CFString,
+            attachmentModeOut: nil) as? NSNumber {
+            SharedFrame.shared.notePublished(sequence: sequence.uint64Value)
+        }
     }
 }
 
@@ -100,22 +104,17 @@ final class SourceStreamSource: NSObject, CMIOExtensionStreamSource {
     var stream: CMIOExtensionStream? {
         didSet { publisher = stream.map(CMIOExtensionSamplePublisher.init(stream:)) }
     }
-    private var timer: DispatchSourceTimer?
+    private let timer: CameraStreamTiming
     private var streamingClients = 0
-    private let queue = DispatchQueue(label: "awc.source")
     private let format = makeFormat()
     private let frameProvider: CameraFrameProviding
     private var publisher: ExtensionSamplePublishing?
 
-    init(localizedName: String) {
-        frameProvider = SharedCameraFrameProvider()
-        super.init()
-    }
-
-    init(localizedName: String, frameProvider: CameraFrameProviding,
-         publisher: ExtensionSamplePublishing? = nil) {
+    init(localizedName: String, frameProvider: CameraFrameProviding = SharedCameraFrameProvider(),
+         publisher: ExtensionSamplePublishing? = nil, timer: CameraStreamTiming = CameraStreamTimer()) {
         self.frameProvider = frameProvider
         self.publisher = publisher
+        self.timer = timer
         super.init()
     }
 
@@ -145,9 +144,7 @@ final class SourceStreamSource: NSObject, CMIOExtensionStreamSource {
     func startStream() throws {
         streamingClients += 1
         guard streamingClients == 1 else { return }
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: 1.0 / 30.0)
-        timer.setEventHandler { [weak self] in
+        timer.start { [weak self] in
             guard let self, let publisher = self.publisher else { return }
             // Both timestamps must use the .hostTime clock advertised by the
             // stream. Unix wall time and a zero-based frame counter do not.
@@ -159,16 +156,13 @@ final class SourceStreamSource: NSObject, CMIOExtensionStreamSource {
             publisher.send(sample, hostTimeNanoseconds: UInt64(CMTimeConvertScale(
                 hostTime, timescale: 1_000_000_000, method: .default).value))
         }
-        timer.resume()
-        self.timer = timer
     }
 
     func stopStream() throws {
         guard streamingClients > 0 else { return }
         streamingClients -= 1
         guard streamingClients == 0 else { return }
-        timer?.cancel()
-        timer = nil
+        timer.stop()
     }
 }
 

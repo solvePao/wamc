@@ -8,7 +8,7 @@ final class SetupModelTests: XCTestCase {
     func testRefreshAndCompletionRequireInstalledSignedActiveSink() {
         let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: true)
         let inspector = FakeSetupPackageInspector(installed: false, issue: "invalid signature")
-        let model = SetupModel(environment: environment, packageInspector: inspector,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: environment, packageInspector: inspector,
                                bundleURL: URL(fileURLWithPath: "/tmp/Test.app"))
         model.showSetup = true
 
@@ -26,7 +26,7 @@ final class SetupModelTests: XCTestCase {
 
     func testCameraAuthorizationRoutesToRequestOrPrivacySettings() async {
         let environment = FakeSetupEnvironment(authorization: .notDetermined, sinkRegistered: false)
-        let model = SetupModel(environment: environment,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: environment,
                                packageInspector: FakeSetupPackageInspector(installed: false, issue: nil))
 
         model.enableCameraAccess()
@@ -58,17 +58,18 @@ final class SetupModelTests: XCTestCase {
     }
 
     func testFirstRunSetupRequiresInstalledApplicationAndCurrentSetupVersion() {
+        let defaults = isolatedDefaults()
         let key = "wamc.setupVersion"
-        let previousVersion = UserDefaults.standard.object(forKey: key)
+        let previousVersion = defaults.object(forKey: key)
         defer {
-            if let previousVersion { UserDefaults.standard.set(previousVersion, forKey: key) }
-            else { UserDefaults.standard.removeObject(forKey: key) }
+            if let previousVersion { defaults.set(previousVersion, forKey: key) }
+            else { defaults.removeObject(forKey: key) }
         }
 
-        UserDefaults.standard.removeObject(forKey: key)
-        XCTAssertTrue(SetupModel.needsFirstRunSetup)
-        UserDefaults.standard.set(SetupModel.version, forKey: key)
-        XCTAssertTrue(SetupModel.needsFirstRunSetup,
+        defaults.removeObject(forKey: key)
+        XCTAssertTrue(SetupModel.needsFirstRunSetup(preferences: defaults, bundleURL: URL(fileURLWithPath: "/tmp/WAMC.app")))
+        defaults.set(SetupModel.version, forKey: key)
+        XCTAssertTrue(SetupModel.needsFirstRunSetup(preferences: defaults, bundleURL: URL(fileURLWithPath: "/tmp/WAMC.app")),
                       "A current setup version still requires the installed Applications copy")
     }
 
@@ -91,7 +92,7 @@ final class SetupModelTests: XCTestCase {
     func testStartActivatesInstalledExtensionAndRefreshesReadiness() {
         let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: true)
         let service = FakeCameraExtensionService(status: .unknown)
-        let model = SetupModel(environment: environment,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: environment,
                                packageInspector: FakeSetupPackageInspector(installed: true, issue: nil),
                                extensionService: service)
 
@@ -105,7 +106,7 @@ final class SetupModelTests: XCTestCase {
 
     func testRefreshDoesNotQueryExtensionWhenPackageIsInvalid() {
         let service = FakeCameraExtensionService(status: .unknown)
-        let model = SetupModel(environment: FakeSetupEnvironment(authorization: .authorized,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: FakeSetupEnvironment(authorization: .authorized,
                                                                  sinkRegistered: false),
                                packageInspector: FakeSetupPackageInspector(installed: true,
                                                                            issue: "invalid signature"),
@@ -119,7 +120,7 @@ final class SetupModelTests: XCTestCase {
 
     func testExtensionActivationRoutesApprovalAndRestartStatesSafely() {
         let service = FakeCameraExtensionService(status: .requiresApproval)
-        let model = SetupModel(environment: FakeSetupEnvironment(authorization: .authorized,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: FakeSetupEnvironment(authorization: .authorized,
                                                                  sinkRegistered: false),
                                packageInspector: FakeSetupPackageInspector(installed: true, issue: nil),
                                extensionService: service,
@@ -143,15 +144,16 @@ final class SetupModelTests: XCTestCase {
     }
 
     func testFinishOnlyPersistsSetupAfterExtensionBecomesActive() {
+        let defaults = isolatedDefaults()
         let key = "wamc.setupVersion"
-        let previousVersion = UserDefaults.standard.object(forKey: key)
-        UserDefaults.standard.removeObject(forKey: key)
+        let previousVersion = defaults.object(forKey: key)
+        defaults.removeObject(forKey: key)
         defer {
-            if let previousVersion { UserDefaults.standard.set(previousVersion, forKey: key) }
-            else { UserDefaults.standard.removeObject(forKey: key) }
+            if let previousVersion { defaults.set(previousVersion, forKey: key) }
+            else { defaults.removeObject(forKey: key) }
         }
         let service = FakeCameraExtensionService(status: .disabled)
-        let model = SetupModel(environment: FakeSetupEnvironment(authorization: .authorized,
+        let model = SetupModel(preferences: defaults, environment: FakeSetupEnvironment(authorization: .authorized,
                                                                  sinkRegistered: true),
                                packageInspector: FakeSetupPackageInspector(installed: true, issue: nil),
                                extensionService: service,
@@ -161,18 +163,18 @@ final class SetupModelTests: XCTestCase {
 
         model.finish()
         XCTAssertTrue(model.showSetup)
-        XCTAssertNotEqual(UserDefaults.standard.integer(forKey: key), SetupModel.version)
+        XCTAssertNotEqual(defaults.integer(forKey: key), SetupModel.version)
 
         service.status = .active
         model.finish()
         XCTAssertFalse(model.showSetup)
-        XCTAssertEqual(UserDefaults.standard.integer(forKey: key), SetupModel.version)
+        XCTAssertEqual(defaults.integer(forKey: key), SetupModel.version)
     }
 
     func testFinishWaitsForRegisteredSinkEvenWhenExtensionIsActive() {
         let service = FakeCameraExtensionService(status: .active)
         let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: false)
-        let model = SetupModel(environment: environment,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: environment,
                                packageInspector: FakeSetupPackageInspector(installed: true, issue: nil),
                                extensionService: service)
         model.showSetup = true
@@ -189,7 +191,7 @@ final class SetupModelTests: XCTestCase {
     func testInstallationFailureLeavesSetupUsableAndDoesNotTerminate() async {
         let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: false)
         let installer = FakeApplicationInstaller(error: InstallationFailure.denied)
-        let model = SetupModel(environment: environment,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: environment,
                                packageInspector: FakeSetupPackageInspector(installed: false, issue: nil),
                                installer: installer,
                                bundleURL: URL(fileURLWithPath: "/tmp/Staged.app"))
@@ -205,7 +207,7 @@ final class SetupModelTests: XCTestCase {
     func testInstallationSuccessTerminatesCurrentApplication() async {
         let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: false)
         let installer = FakeApplicationInstaller(error: nil)
-        let model = SetupModel(environment: environment,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: environment,
                                packageInspector: FakeSetupPackageInspector(installed: false, issue: nil),
                                installer: installer,
                                bundleURL: URL(fileURLWithPath: "/tmp/Staged.app"))
@@ -219,7 +221,7 @@ final class SetupModelTests: XCTestCase {
     func testInstallInApplicationsRunsConfiguredInstallerAndReportsCompletion() async {
         let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: false)
         let installer = FakeApplicationInstaller(error: nil)
-        let model = SetupModel(environment: environment,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: environment,
                                packageInspector: FakeSetupPackageInspector(installed: false, issue: nil),
                                installer: installer,
                                bundleURL: URL(fileURLWithPath: "/tmp/Staged.app"))
@@ -236,11 +238,11 @@ final class SetupModelTests: XCTestCase {
 
     func testInstallationIsIgnoredWhenPackageIsAlreadyInstalledOrInvalid() async {
         let installer = FakeApplicationInstaller(error: nil)
-        let installed = SetupModel(environment: FakeSetupEnvironment(authorization: .authorized,
+        let installed = SetupModel(preferences: isolatedDefaults(), environment: FakeSetupEnvironment(authorization: .authorized,
                                                                       sinkRegistered: false),
                                    packageInspector: FakeSetupPackageInspector(installed: true, issue: nil),
                                    installer: installer)
-        let invalid = SetupModel(environment: FakeSetupEnvironment(authorization: .authorized,
+        let invalid = SetupModel(preferences: isolatedDefaults(), environment: FakeSetupEnvironment(authorization: .authorized,
                                                                     sinkRegistered: false),
                                  packageInspector: FakeSetupPackageInspector(installed: false,
                                                                              issue: "invalid"),
@@ -413,7 +415,7 @@ private final class FakeCameraExtensionService: CameraExtensionServicing {
 extension SetupModelTests {
     func testAuthorizedCameraAccessDoesNotRequestOrOpenSettings() {
         let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: false)
-        let model = SetupModel(environment: environment,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: environment,
                                packageInspector: FakeSetupPackageInspector(installed: false, issue: nil))
         model.enableCameraAccess()
         XCTAssertEqual(environment.accessRequests, 0)
@@ -431,7 +433,7 @@ extension SetupModelTests {
 
     func testSetupPollingRefreshesAuthorizationAndStopsCleanly() async {
         let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: false)
-        let model = SetupModel(environment: environment,
+        let model = SetupModel(preferences: isolatedDefaults(), environment: environment,
                                packageInspector: FakeSetupPackageInspector(installed: false, issue: nil))
         model.start()
         defer { model.stop() }

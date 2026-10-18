@@ -15,22 +15,34 @@ protocol SetupEnvironment {
 }
 
 struct SystemSetupEnvironment: SetupEnvironment {
-    func cameraAuthorization() -> AVAuthorizationStatus {
-        AVCaptureDevice.authorizationStatus(for: .video)
+    private let readAuthorization: (AVMediaType) -> AVAuthorizationStatus
+    private let requestAccess: (AVMediaType, @escaping @Sendable (Bool) -> Void) -> Void
+    private let readSinkRegistration: () -> Bool
+    private let openURL: (URL) -> Bool
+    private let terminate: (Any?) -> Void
+
+    init(readAuthorization: @escaping (AVMediaType) -> AVAuthorizationStatus = AVCaptureDevice.authorizationStatus,
+         requestAccess: @escaping (AVMediaType, @escaping @Sendable (Bool) -> Void) -> Void = AVCaptureDevice.requestAccess,
+         readSinkRegistration: @escaping () -> Bool = VirtualCameraDevice.sinkIsRegistered,
+         openURL: @escaping (URL) -> Bool = NSWorkspace.shared.open,
+         terminate: @escaping (Any?) -> Void = NSApplication.shared.terminate) {
+        self.readAuthorization = readAuthorization
+        self.requestAccess = requestAccess
+        self.readSinkRegistration = readSinkRegistration
+        self.openURL = openURL
+        self.terminate = terminate
     }
 
-    func requestCameraAccess(completion: @escaping (Bool) -> Void) {
-        AVCaptureDevice.requestAccess(for: .video, completionHandler: completion)
-    }
-
-    func sinkIsRegistered() -> Bool { VirtualCameraDevice.sinkIsRegistered() }
+    func cameraAuthorization() -> AVAuthorizationStatus { readAuthorization(.video) }
+    func requestCameraAccess(completion: @escaping (Bool) -> Void) { requestAccess(.video, completion) }
+    func sinkIsRegistered() -> Bool { readSinkRegistration() }
 
     func openPrivacyPane(_ pane: String) {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") else { return }
-        NSWorkspace.shared.open(url)
+        _ = openURL(url)
     }
 
-    func terminateApplication() { NSApp.terminate(nil) }
+    func terminateApplication() { terminate(nil) }
 }
 
 protocol SetupPackageInspecting {
@@ -127,8 +139,16 @@ struct SystemApplicationInstaller: ApplicationInstallationServicing {
 final class SetupModel: ObservableObject {
     static let version = 1
     static var needsFirstRunSetup: Bool {
-        UserDefaults.standard.integer(forKey: "wamc.setupVersion") < version
-            || !SetupReadiness.isApplicationsInstall(Bundle.main.bundleURL.resolvingSymlinksInPath().path)
+        needsFirstRunSetup(preferences: .standard, bundleURL: Bundle.main.bundleURL)
+    }
+
+    static func needsFirstRunSetup(preferences: UserDefaults, bundleURL: URL) -> Bool {
+        preferences.integer(forKey: "wamc.setupVersion") < version
+            || !SetupReadiness.isApplicationsInstall(bundleURL.resolvingSymlinksInPath().path)
+    }
+
+    var requiresFirstRunSetup: Bool {
+        Self.needsFirstRunSetup(preferences: preferences, bundleURL: bundleURL)
     }
 
     let extensionManager: CameraExtensionManager
@@ -146,8 +166,9 @@ final class SetupModel: ObservableObject {
     private let extensionService: CameraExtensionServicing
     private let installer: ApplicationInstallationServicing
     private let bundleURL: URL
+    private let preferences: UserDefaults
 
-    init(environment: SetupEnvironment? = nil,
+    init(preferences: UserDefaults = .standard, environment: SetupEnvironment? = nil,
          packageInspector: SetupPackageInspecting = SystemSetupPackageInspector(),
          extensionManager: CameraExtensionManager? = nil,
          extensionService: CameraExtensionServicing? = nil,
@@ -160,6 +181,7 @@ final class SetupModel: ObservableObject {
         self.extensionService = extensionService ?? self.extensionManager
         self.installer = installer
         self.bundleURL = bundleURL
+        self.preferences = preferences
         cameraAuthorization = activeEnvironment.cameraAuthorization()
         inspectPackage()
         observation = self.extensionService.statusPublisher.sink { [weak self] _ in
@@ -218,7 +240,7 @@ final class SetupModel: ObservableObject {
     func finish() {
         guard installed, packageIssue == nil, sinkRegistered,
               extensionService.status == .active else { return }
-        UserDefaults.standard.set(Self.version, forKey: "wamc.setupVersion")
+        preferences.set(Self.version, forKey: "wamc.setupVersion")
         showSetup = false
     }
 
@@ -249,16 +271,19 @@ final class SetupModel: ObservableObject {
         packageIssue = packageInspector.signingIssue(bundleURL: bundleURL)
     }
 
-    nonisolated static func signingIssue(in bundle: Bundle) -> String? {
-        func information(_ url: URL) -> [String: Any]? {
-            var code: SecStaticCode?
-            guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
-                  let code,
-                  SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), nil) == errSecSuccess else { return nil }
-            var info: CFDictionary?
-            guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess else { return nil }
-            return info as? [String: Any]
-        }
+    nonisolated static func signingInformation(at url: URL) -> [String: Any]? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
+              let code,
+              SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), nil) == errSecSuccess else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess else { return nil }
+        return info as? [String: Any]
+    }
+
+    nonisolated static func signingIssue(in bundle: Bundle,
+        information: (URL) -> [String: Any]? = signingInformation,
+        extensionBundle: (URL) -> Bundle? = Bundle.init(url:)) -> String? {
         guard let host = information(bundle.bundleURL),
               let hostEntitlements = host[kSecCodeInfoEntitlementsDict as String] as? [String: Any],
               hostEntitlements["com.apple.developer.system-extension.install"] as? Bool == true,
@@ -268,7 +293,7 @@ final class SetupModel: ObservableObject {
         let extensionURL = bundle.bundleURL.appendingPathComponent(
             "Contents/Library/SystemExtensions/\(CameraExtensionManager.extensionBundleID).systemextension")
         guard let info = information(extensionURL), info[kSecCodeInfoTeamIdentifier as String] as? String == team,
-              let extensionBundle = Bundle(url: extensionURL),
+              let extensionBundle = extensionBundle(extensionURL),
               let cmio = extensionBundle.infoDictionary?["CMIOExtension"] as? [String: Any],
               cmio["CMIOExtensionMachServiceName"] as? String == "\(team).\(CameraExtensionManager.extensionBundleID)",
               let entitlements = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any],

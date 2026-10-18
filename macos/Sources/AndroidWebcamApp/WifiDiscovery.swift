@@ -134,8 +134,11 @@ final class TrustedDeviceStore: ObservableObject {
 
     private static let key = "wamc.trustedDeviceIds"
 
-    init() {
-        let saved = UserDefaults.standard.stringArray(forKey: Self.key) ?? []
+    private let preferences: UserDefaults
+
+    init(preferences: UserDefaults = .standard) {
+        self.preferences = preferences
+        let saved = preferences.stringArray(forKey: Self.key) ?? []
         trusted = TrustedDevices(trustedIds: Set(saved))
     }
 
@@ -152,6 +155,6 @@ final class TrustedDeviceStore: ObservableObject {
     }
 
     private func persist() {
-        UserDefaults.standard.set(Array(trusted.trustedIds), forKey: Self.key)
+        preferences.set(Array(trusted.trustedIds), forKey: Self.key)
     }
 }

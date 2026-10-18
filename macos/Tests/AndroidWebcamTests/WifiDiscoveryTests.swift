@@ -63,7 +63,7 @@ final class WifiDiscoveryTests: XCTestCase {
 
     @MainActor
     func testTrustedDeviceStoreLoadsPersistsAndForgetsIdentities() {
-        let defaults = UserDefaults.standard
+        let defaults = isolatedDefaults()
         let key = "wamc.trustedDeviceIds"
         let previous = defaults.object(forKey: key)
         defer {
@@ -71,15 +71,15 @@ final class WifiDiscoveryTests: XCTestCase {
             else { defaults.removeObject(forKey: key) }
         }
         defaults.set(["known-phone"], forKey: key)
-        let store = TrustedDeviceStore()
+        let store = TrustedDeviceStore(preferences: defaults)
 
         XCTAssertTrue(store.isTrusted("known-phone"))
         XCTAssertFalse(store.isTrusted("new-phone"))
         store.trust("new-phone")
-        XCTAssertTrue(UserDefaults.standard.stringArray(forKey: key)?.contains("new-phone") == true)
+        XCTAssertTrue(defaults.stringArray(forKey: key)?.contains("new-phone") == true)
         store.untrust("known-phone")
         XCTAssertFalse(store.isTrusted("known-phone"))
-        XCTAssertTrue(UserDefaults.standard.stringArray(forKey: key)?.contains("new-phone") == true)
+        XCTAssertTrue(defaults.stringArray(forKey: key)?.contains("new-phone") == true)
     }
 
     @MainActor
@@ -91,17 +91,17 @@ final class WifiDiscoveryTests: XCTestCase {
         XCTAssertEqual(browsers.count, 1, "Repeated start must retain one browser")
         let original = try XCTUnwrap(browsers.first)
         original.stateUpdateHandler?(.ready)
-        try await Task.sleep(nanoseconds: 10_000_000)
+        await drainMainQueue()
         XCTAssertEqual(discovery.statusText, "No phones found on this Wi-Fi network yet")
         original.stateUpdateHandler?(.waiting(.posix(.ENETDOWN)))
-        try await Task.sleep(nanoseconds: 10_000_000)
+        await drainMainQueue()
         XCTAssertTrue(discovery.statusText.hasPrefix("Wi-Fi discovery waiting:"))
         original.stateUpdateHandler?(.failed(.posix(.EACCES)))
-        try await Task.sleep(nanoseconds: 10_000_000)
+        await drainMainQueue()
         XCTAssertTrue(discovery.statusText.hasPrefix("Wi-Fi discovery failed:"))
         original.stateUpdateHandler?(.setup)
         original.browseResultsChangedHandler?([], [])
-        try await Task.sleep(nanoseconds: 10_000_000)
+        await drainMainQueue()
         XCTAssertEqual(discovery.statusText, "No phones found on this Wi-Fi network yet")
 
         discovery.stop()
@@ -109,7 +109,7 @@ final class WifiDiscoveryTests: XCTestCase {
         XCTAssertEqual(browsers.count, 2)
         original.stateUpdateHandler?(.failed(.posix(.ECONNRESET)))
         original.browseResultsChangedHandler?([], [])
-        try await Task.sleep(nanoseconds: 10_000_000)
+        await drainMainQueue()
         XCTAssertEqual(discovery.statusText, "Searching for phones on Wi-Fi…",
                        "Late callbacks must not overwrite the new search")
         discovery.stop()

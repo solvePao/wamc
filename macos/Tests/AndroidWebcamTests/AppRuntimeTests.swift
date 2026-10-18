@@ -97,22 +97,22 @@ final class AppRuntimeTests: XCTestCase {
         let activation = try XCTUnwrap(submitted.first)
         XCTAssertTrue(activation.delegate === manager)
         manager.requestNeedsUserApproval(activation)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(manager.status, .requiresApproval)
         manager.request(activation, didFinishWithResult: .completed)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(submitted.count, 2, "Completed activation must refresh installed properties")
         manager.refreshStatus()
         XCTAssertEqual(submitted.count, 2, "Duplicate property queries must be suppressed")
         manager.request(submitted[1], foundProperties: [])
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(manager.status, .notInstalled)
 
         manager.refreshStatus()
         XCTAssertEqual(submitted.count, 3)
         manager.request(submitted[2], didFailWithError: NSError(domain: "test", code: 1,
             userInfo: [NSLocalizedDescriptionKey: "Property permission denied"]))
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(manager.status, .failed("Property permission denied"))
         manager.refreshStatus()
         XCTAssertEqual(submitted.count, 4, "A failed property query permits retry")
@@ -128,7 +128,7 @@ final class AppRuntimeTests: XCTestCase {
         let manager = CameraExtensionManager(submitRequest: { requests.append($0) })
         manager.activate()
         manager.request(try XCTUnwrap(requests.first), didFinishWithResult: .willCompleteAfterReboot)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(manager.status, .requiresRestart)
         manager.refreshStatus()
         XCTAssertEqual(requests.count, 1, "Restart-pending extensions must not be queried again")
@@ -136,7 +136,7 @@ final class AppRuntimeTests: XCTestCase {
         manager.activate()
         manager.request(requests[1], didFailWithError: NSError(domain: "test", code: 2,
             userInfo: [NSLocalizedDescriptionKey: "Activation rejected"]))
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(manager.status, .failed("Activation rejected"))
         manager.activate()
         XCTAssertEqual(requests.count, 3, "Activation failure permits explicit retry")
@@ -219,7 +219,7 @@ final class AppRuntimeTests: XCTestCase {
     @MainActor
     func testSessionModelSnapshotsAndCancelsManualConnection() {
         let connection = ConnectionController()
-        let model = SessionModel(connection: connection)
+        let model = SessionModel(preferences: isolatedDefaults(), connection: connection)
         let address = ConnectionTarget.address("127.0.0.1", 1)
 
         let ready = model.snapshot(feed: .idle, sourceLabel: "USB")
@@ -384,7 +384,7 @@ final class AppRuntimeTests: XCTestCase {
     @MainActor
     func testConnectionTimeoutBlocksAutomaticRetryUntilTargetDisappears() async throws {
         let transport = FakeStreamTransport()
-        let controller = ConnectionController(receiver: transport)
+        let controller = ConnectionController(receiver: transport, connectionTimeout: .milliseconds(1))
         let target = ConnectionTarget.address("127.0.0.1", 27183)
         let timedOut = expectation(description: "Missing HELLO fails the connection deadline")
         controller.onStateChange = { state, _ in
@@ -415,12 +415,12 @@ final class AppRuntimeTests: XCTestCase {
     @MainActor
     func testStopTimeoutCompletesAllWaitersAndRejectsNewConnectionsDuringTeardown() async throws {
         let transport = FakeStreamTransport()
-        let controller = ConnectionController(receiver: transport)
+        let controller = ConnectionController(receiver: transport, stopTimeout: .milliseconds(1))
         let target = ConnectionTarget.address("127.0.0.1", 27183)
         controller.connect(to: target, manual: true)
         let attempt = try XCTUnwrap(transport.attempt)
         transport.emit(.hello(["model": "Phone"]), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertTrue(controller.state.isConnected)
         transport.completesControls = false
         let first = expectation(description: "First stop waiter finishes despite missing acknowledgement")
@@ -434,7 +434,7 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertEqual(controller.state, .disconnected)
         XCTAssertEqual(transport.sentControls.filter { $0.first?.1 == "stop" }.count, 1)
         transport.pendingCompletions.forEach { $0() }
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await drainMainQueue()
         XCTAssertEqual(controller.state, .disconnected, "Late acknowledgement must not run completions twice")
     }
 

@@ -53,7 +53,7 @@ The final command prompts for the password without placing it in command history
 ## Version and release
 
 1. Update `release.json`: increase both `version` and `build`. Initial updater release is `0.2.0`, build `4`.
-2. Run Build CI and review both platform checks. Android and Mac retain 90% production line coverage gates.
+2. Run `python3 scripts/testing/run_tests.py` locally and resolve any test or coverage failures. Both app gates require exact 100% production line coverage. Then run Build CI and review both platform builds; GitHub Actions does not execute tests.
 3. Commit the validated version, tag it `v0.2.0` (matching the version file), and push that tag to the source repository.
 4. Release CI signs the APK, signs and notarizes the Mac app and DMG, and signs the DMG for Sparkle.
 5. After both builds succeed, publication creates a draft in the public binary repository, uploads paired artifacts and update metadata, verifies its asset set, then publishes it. A separate job copies the verified assets into a release on `solvePao/wamc`, using that repository’s built-in Actions token. If mirroring fails, rerun the failed mirror job.

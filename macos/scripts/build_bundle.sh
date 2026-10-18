@@ -13,7 +13,7 @@ HOST_PROFILE="$(python3 "$SCRIPT_DIR/find_signing_profile.py")"
 
 echo "==> Building Swift packages (Release)..."
 cd "$MACOS_DIR"
-if [[ "${WAMC_COVERAGE_VERIFIED:-false}" != true ]]; then
+if [[ "${WAMC_RUN_TESTS:-true}" == true && "${WAMC_COVERAGE_VERIFIED:-false}" != true ]]; then
     python3 "$SCRIPT_DIR/check_macos_coverage.py"
 fi
 xcrun swift build -c release
@@ -52,8 +52,11 @@ fi
 echo "==> Compiling CameraExtension..."
 xcrun swiftc -target arm64-apple-macos14.0 -O \
     -framework Foundation -framework CoreMediaIO -framework CoreVideo \
+    "$MACOS_DIR/Sources/AndroidWebcamCore/CameraHealthSnapshot.swift" \
     "$MACOS_DIR/CameraExtension/ExtensionMain.swift" \
     "$MACOS_DIR/CameraExtension/ExtensionLogger.swift" \
+    "$MACOS_DIR/CameraExtension/CameraStreamTimer.swift" \
+    "$MACOS_DIR/CameraExtension/CameraMediaFactory.swift" \
     "$MACOS_DIR/CameraExtension/ProviderSource.swift" \
     "$MACOS_DIR/CameraExtension/DeviceSource.swift" \
     "$MACOS_DIR/CameraExtension/StreamSources.swift" \

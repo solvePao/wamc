@@ -94,7 +94,7 @@ final class AppUpdateControllerTests: XCTestCase {
     }
 
     func testMenuIncludesUpdaterWhileServicesRemainDisabled() {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
         let updater = AppUpdateController(enabled: false, isStreaming: { false })
         let menu = NSHostingView(rootView: MenuContent(model: model, updater: updater))
 
@@ -116,6 +116,18 @@ final class AppUpdateControllerTests: XCTestCase {
         await fulfillment(of: [resumed], timeout: 2)
         XCTAssertFalse(updater.installationDeferred)
     }
+    func testDefaultDriverRejectsTestHostWithoutPresentingAnAlert() {
+        var errors: [Error] = []
+        let controller = AppUpdateController(enabled: true, isStreaming: { false },
+                                             reportError: { errors.append($0) })
+        controller.startOnce()
+        controller.checkForUpdates()
+
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertTrue(errors.first?.localizedDescription.contains("installed WAMC release") == true)
+        XCTAssertFalse(controller.installationDeferred)
+    }
+
 }
 
 @MainActor

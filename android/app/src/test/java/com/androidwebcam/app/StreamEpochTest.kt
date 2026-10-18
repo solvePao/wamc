@@ -28,6 +28,7 @@ class StreamEpochTest {
     @Test fun gateDropsPreIdrFramesAfterRestart() {
         val gate = RestartGate()
         gate.reset()
+        assertTrue(gate.awaitingKeyframe)
         assertFalse(gate.shouldForward(false))
         assertFalse(gate.shouldForward(false))
         assertTrue(gate.shouldForward(true))

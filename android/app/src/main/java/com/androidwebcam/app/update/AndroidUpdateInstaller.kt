@@ -9,9 +9,9 @@ import android.content.pm.PackageManager
 import android.os.Build
 import java.io.File
 
-class AndroidUpdateInstaller(private val context: Context) {
+class AndroidUpdateInstaller(private val context: Context) : UpdatePackageInstaller {
     @Suppress("DEPRECATION")
-    fun validate(file: File, release: AndroidRelease) {
+    override fun validate(file: File, release: AndroidRelease) {
         val manager = context.packageManager
         val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
         val installed = manager.getPackageInfo(context.packageName, flags)
@@ -30,7 +30,7 @@ class AndroidUpdateInstaller(private val context: Context) {
         return certificates.orEmpty().map { it.toCharsString() }.toSet()
     }
 
-    fun install(file: File, release: AndroidRelease) {
+    override fun install(file: File, release: AndroidRelease) {
         validate(file, release)
         check(context.packageManager.canRequestPackageInstalls()) { "Allow WAMC to install updates in Android settings" }
         val installer = context.packageManager.packageInstaller

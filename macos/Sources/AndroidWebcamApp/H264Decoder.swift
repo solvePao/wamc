@@ -31,6 +31,35 @@ protocol VideoToolboxDecodingSession: AnyObject {
     func invalidate()
 }
 
+/// CoreMedia allocations can fail independently of the decoder session.
+protocol DecoderBufferCreating {
+    func makeBlockBuffer(length: Int) -> CMBlockBuffer?
+    func makeSampleBuffer(block: CMBlockBuffer, format: CMVideoFormatDescription,
+                          timing: inout CMSampleTimingInfo, size: Int) -> CMSampleBuffer?
+}
+
+private struct SystemDecoderBufferFactory: DecoderBufferCreating {
+    func makeBlockBuffer(length: Int) -> CMBlockBuffer? {
+        var buffer: CMBlockBuffer?
+        let status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: length,
+            blockAllocator: kCFAllocatorDefault, customBlockSource: nil,
+            offsetToData: 0, dataLength: length, flags: 0, blockBufferOut: &buffer)
+        return status == noErr ? buffer : nil
+    }
+
+    func makeSampleBuffer(block: CMBlockBuffer, format: CMVideoFormatDescription,
+                          timing: inout CMSampleTimingInfo, size: Int) -> CMSampleBuffer? {
+        var buffer: CMSampleBuffer?
+        var size = size
+        let status = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format,
+            sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &buffer)
+        return status == noErr ? buffer : nil
+    }
+}
+
 private final class SystemVideoToolboxDecodingSession: VideoToolboxDecodingSession {
     private let session: VTDecompressionSession
 
@@ -56,6 +85,7 @@ private final class SystemVideoToolboxDecodingSession: VideoToolboxDecodingSessi
 final class H264Decoder: H264Decoding {
     private let sessionFactory: VideoToolboxSessionFactory
     private let formatFactory: DecoderFormatFactory
+    private let bufferFactory: DecoderBufferCreating
     private let lock = NSLock()
     private var session: VideoToolboxDecodingSession?
     private var formatDescription: CMVideoFormatDescription?
@@ -65,9 +95,11 @@ final class H264Decoder: H264Decoding {
     var onError: ((StreamFrameContext) -> Void)?
 
     init(sessionFactory: @escaping VideoToolboxSessionFactory = H264Decoder.createSession,
-         formatFactory: @escaping DecoderFormatFactory = H264Decoder.makeFormatDescription) {
+         formatFactory: @escaping DecoderFormatFactory = H264Decoder.makeFormatDescription,
+         bufferFactory: DecoderBufferCreating = SystemDecoderBufferFactory()) {
         self.sessionFactory = sessionFactory
         self.formatFactory = formatFactory
+        self.bufferFactory = bufferFactory
     }
 
     func configure(with config: WireProtocol.Config, context: StreamFrameContext) {
@@ -175,12 +207,7 @@ final class H264Decoder: H264Decoding {
         }
 
         let avcc = H264.annexBToAVCC(annexB)
-        var blockBuffer: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: avcc.count,
-            blockAllocator: kCFAllocatorDefault, customBlockSource: nil,
-            offsetToData: 0, dataLength: avcc.count, flags: 0,
-            blockBufferOut: &blockBuffer) == noErr, let blockBuffer else {
+        guard let blockBuffer = bufferFactory.makeBlockBuffer(length: avcc.count) else {
             needsKeyframe = true
             lock.unlock()
             AppLogger.stream.error("Creating decoder block buffer failed")
@@ -199,14 +226,8 @@ final class H264Decoder: H264Decoding {
             duration: CMTime(value: 1, timescale: 30),
             presentationTimeStamp: CMTime(value: ptsUs, timescale: 1_000_000),
             decodeTimeStamp: .invalid)
-        var sampleBuffer: CMSampleBuffer?
-        var sizes = [avcc.count]
-        guard CMSampleBufferCreateReady(
-            allocator: kCFAllocatorDefault, dataBuffer: blockBuffer,
-            formatDescription: formatDescription, sampleCount: 1,
-            sampleTimingEntryCount: 1, sampleTimingArray: &timing,
-            sampleSizeEntryCount: 1, sampleSizeArray: &sizes,
-            sampleBufferOut: &sampleBuffer) == noErr, let sampleBuffer else {
+        guard let sampleBuffer = bufferFactory.makeSampleBuffer(
+            block: blockBuffer, format: formatDescription, timing: &timing, size: avcc.count) else {
             needsKeyframe = true
             lock.unlock()
             AppLogger.stream.error("Creating decoder sample buffer failed")
@@ -267,7 +288,7 @@ final class H264Decoder: H264Decoding {
     }
 
     /// Holds every parameter-set byte buffer alive until CoreMedia has consumed its pointers.
-    private static func makeFormatDescription(
+    static func makeFormatDescription(
         _ codec: Int, _ sets: [Data], _ width: Int, _ height: Int
     ) -> (status: OSStatus, format: CMVideoFormatDescription?) {
         var format: CMVideoFormatDescription?
@@ -288,7 +309,7 @@ final class H264Decoder: H264Decoding {
                     nalUnitHeaderLength: 4, formatDescriptionOut: &format)
             }
             return sets[index].withUnsafeBytes { bytes in
-                guard let base = bytes.baseAddress else {
+                guard !bytes.isEmpty, let base = bytes.baseAddress else {
                     return OSStatus(kCMFormatDescriptionError_ValueNotAvailable)
                 }
                 pointers.append(base.assumingMemoryBound(to: UInt8.self))

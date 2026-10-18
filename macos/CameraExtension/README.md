@@ -40,8 +40,9 @@ OBS Virtual Camera's crossed-out logo means that OBS is selected.
    Alternatively run `xcodegen generate` with `project.yml` in this folder.
 2. Replace the template sources with the files in this folder
    (`ExtensionMain.swift`, `ProviderSource.swift`, `DeviceSource.swift`,
-   `StreamSources.swift`). If the template generated its own main, keep the
-   template main and delete `ExtensionMain.swift`.
+   `StreamSources.swift`, `ExtensionLogger.swift`) and the shared
+   `Sources/AndroidWebcamCore/CameraHealthSnapshot.swift` contract. If the template
+   generated its own main, keep the template main and delete `ExtensionMain.swift`.
 3. Set the extension target's Info.plist to `CameraExtension-Info.plist`
    values (Mach service name = the extension bundle ID) and apply
    `CameraExtension.entitlements`. Sign app + extension with the same team.
@@ -68,3 +69,28 @@ old sink queue full for more than a second.
 - [ ] Same in Chrome (Google Meet), Zoom, and OBS.
 - [ ] Unplug USB: meeting apps keep the camera, showing the placeholder.
 - [ ] Replug: feed resumes without restarting the meeting app.
+
+## Automatic camera-output verification
+
+The device exposes a read-only `whlt` property (`4cc_whlt_glob_0000`) as a JSON
+string. Its versioned snapshot identifies this extension instance and includes
+sink receipt and live source publication sequences with monotonic uptime times.
+Only fresh phone frames advance the live source sequence; placeholder publication
+does not. The app reads this property through CoreMediaIO, and the signed build
+compiles the same contract source as the Swift package.
+
+When phone video and the sink are live, WAMC briefly opens the camera through
+AVFoundation and requires three advancing image samples with advancing fresh
+phone-frame publication. The check stops after success or a five-second timeout.
+It reruns after a feed generation or extension replacement and can be retried
+manually after failure. After success, fresh sink delivery maintains readiness;
+the readback session does not remain open. WAMC observes the camera's
+`isInUseByAnotherApplication` state separately and never names a client app.
+
+For manual acceptance, check the window, menu and Setup & Diagnostics while
+selecting Android Camera in Photo Booth and FaceTime separately. Confirm moving
+video and that usage changes when the client switches away or closes. Check Stop,
+unplug/replug, stalls, source and quality changes, camera permission denial, and
+an old extension without `whlt`. Placeholders, missing permission and unsupported
+health reporting must never produce **Ready for apps**. Actual rendering remains
+a check inside the chosen client app.

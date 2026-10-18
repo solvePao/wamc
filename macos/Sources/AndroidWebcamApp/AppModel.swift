@@ -43,10 +43,15 @@ final class AppModel: ObservableObject {
     @Published var devices: [AndroidDevice] = []
     @Published var nativeWebcams: [String] = []
     let connection: ConnectionController
-    lazy var session = SessionModel(connection: connection)
+    lazy var session = SessionModel(preferences: preferences, connection: connection)
     var connected: Bool { connection.state.isConnected }
     var connectionState: ConnectionState { connection.state }
-    @Published private(set) var feedState: FeedState = .idle
+    @Published private(set) var feedState: FeedState = .idle {
+        didSet { updateCameraHealth() }
+    }
+    let cameraHealth: VirtualCameraHealthMonitor
+    private var cameraHealthEnabled = false
+    private var cameraHealthObservation: AnyCancellable?
     @Published var deviceInfo: [String: String] = [:]
     let diagnostics = StreamDiagnostics()
     private(set) var stats: StreamStats {
@@ -88,9 +93,10 @@ final class AppModel: ObservableObject {
     let renderer = PreviewRenderer()
     let setup: SetupModel
     var extensionManager: CameraExtensionManager { setup.extensionManager }
-    let wifiDiscovery = WifiDiscovery()
-    let trustedStore = TrustedDeviceStore()
-    let launchAtLogin = LaunchAtLogin()
+    let wifiDiscovery: WifiDiscovery
+    let trustedStore: TrustedDeviceStore
+    let launchAtLogin: LaunchAtLogin
+    private let preferences: UserDefaults
     private let decoder: H264Decoding
     private let deviceInventory: DeviceInventory
     private let frameQueue = LatestFrameQueue()
@@ -100,6 +106,7 @@ final class AppModel: ObservableObject {
     private var connectionObservation: AnyCancellable?
     private var sessionObservation: AnyCancellable?
     private let keyframeWatchdog = KeyframeWatchdog()
+    private let now: () -> Date
     private var watchdogTimer: Timer?
     private var displayTimer: Timer?
     private let frameContexts = StreamFrameContextTracker()
@@ -118,15 +125,28 @@ final class AppModel: ObservableObject {
 
     /// Starts app-owned timers and external services when running the app.
     /// Tests can build view state without starting Bonjour, setup polling, or ADB.
-    init(startServices: Bool = true, connection: ConnectionController? = nil,
+    init(preferences: UserDefaults = .standard, startServices: Bool = true, connection: ConnectionController? = nil,
          decoder: H264Decoding? = nil, extensionBridge: ExtensionBridge? = nil,
          deviceInventory: DeviceInventory = SystemDeviceInventory(),
-         setupModel: SetupModel? = nil) {
+         setupModel: SetupModel? = nil, loginItem: LaunchAtLogin? = nil,
+         cameraHealthMonitor: VirtualCameraHealthMonitor? = nil,
+         discovery: WifiDiscovery? = nil, timerScheduler: AppTimerScheduling = AppTimerScheduler(),
+         now: @escaping () -> Date = Date.init) {
+        cameraHealth = cameraHealthMonitor ?? VirtualCameraHealthMonitor()
+        self.preferences = preferences
+        trustedStore = TrustedDeviceStore(preferences: preferences)
+        launchAtLogin = loginItem ?? LaunchAtLogin(defaults: preferences)
+        wifiDiscovery = discovery ?? WifiDiscovery()
+        self.now = now
         self.connection = connection ?? ConnectionController()
         self.decoder = decoder ?? H264Decoder()
         self.extensionBridge = extensionBridge ?? ExtensionBridge()
         self.deviceInventory = deviceInventory
-        setup = setupModel ?? SetupModel()
+        setup = setupModel ?? SetupModel(preferences: preferences)
+        cameraHealthEnabled = startServices
+        cameraHealthObservation = cameraHealth.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         let activeConnection = self.connection
         extensionStatusObservation = setup.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -160,7 +180,7 @@ final class AppModel: ObservableObject {
                 self.resetDecoderState()
                 self.phoneGeneration = generation
                 self.awaitingGeneration = false
-                if self.feedState != .idle { self.keyframeWatchdog.noteConfig() }
+                if self.feedState != .idle { self.keyframeWatchdog.noteConfig(now: now()) }
             }
             self.deviceInfo = info
             if firstHello {
@@ -172,7 +192,7 @@ final class AppModel: ObservableObject {
         self.decoder.onPixelBuffer = { [weak self] pixels, pts, context in
             DispatchQueue.main.async {
                 guard let self, self.connected, self.frameContexts.accepts(context) else { return }
-                self.keyframeWatchdog.noteKeyframe()
+                self.keyframeWatchdog.noteKeyframe(now: now())
                 let upright = FrameRotation.rotate(pixels, quarterTurns: context.rotation)
                 self.frameQueue.enqueue(upright, context: context)
                 if let arrived = self.arrivalByPts.removeValue(forKey: pts) {
@@ -202,7 +222,7 @@ final class AppModel: ObservableObject {
             }
         }
         if startServices {
-            displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) {
+            displayTimer = timerScheduler.repeating(every: 1.0 / 60) {
                 [weak self] _ in
                 Task { @MainActor in self?.pumpLatestFrame() }
             }
@@ -213,7 +233,7 @@ final class AppModel: ObservableObject {
             // FaceTime never saw "Android Camera" while the badge claimed Active.
             setup.start()
             refreshDevices()
-            watchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) {
+            watchdogTimer = timerScheduler.repeating(every: 2.5) {
                 [weak self] _ in Task { @MainActor in self?.pollDevices() }
             }
         }
@@ -224,6 +244,7 @@ final class AppModel: ObservableObject {
     /// on decode and on the 60 Hz fallback timer.
     private func pumpLatestFrame() {
         checkFeedFreshness()
+        updateCameraHealth()
         maybeRequestKeyframe()
         guard connected, let frame = frameQueue.dequeueLatestFrame(),
               let context = frame.context, frameContexts.accepts(context) else { return }
@@ -257,14 +278,14 @@ final class AppModel: ObservableObject {
     /// the first attempt so a normal join shows no flicker.
     private func maybeRequestKeyframe() {
         guard connected, feedState != .idle else { return }
-        if keyframeWatchdog.requestDue() {
+        if keyframeWatchdog.requestDue(now: now()) {
             connection.sendControl([("cmd", "requestKeyframe")])
             if keyframeWatchdog.attempts >= 2 {
                 let waiting = "Waiting for keyframe — requesting recovery…"
                 if statusText != waiting { statusText = waiting }
             }
         }
-        if keyframeWatchdog.timedOut() {
+        if keyframeWatchdog.timedOut(now: now()) {
             if feedState != .stalled { feedState = .stalled }
             inFlightQuality = nil
             let timeout = "Keyframe timeout — open WAMC on the phone or reconnect the camera."
@@ -405,7 +426,7 @@ final class AppModel: ObservableObject {
         stats = liveStats
         feedState = updatingQuality ? .updating : .starting
         statusText = updatingQuality ? "Applying quality…" : "Starting camera…"
-        keyframeWatchdog.noteConfig()
+        keyframeWatchdog.noteConfig(now: now())
         connection.sendControl(StreamCommand.start(quality: qualityMode, transport: activeTransport))
     }
 
@@ -463,7 +484,7 @@ final class AppModel: ObservableObject {
         let parameters = sets.map { $0.base64EncodedString() }.joined(separator: ":")
         guard let context = frameContexts.configure(key: desc + ":" + parameters, rotation: rotation) else { return }
         frameQueue.clear()
-        keyframeWatchdog.noteConfig()
+        keyframeWatchdog.noteConfig(now: now())
         apply(context)
         rotationQuarterTurns = rotation
         codecLabel = codec == WireProtocol.codecHEVC ? "HEVC" : "H.264"
@@ -511,6 +532,18 @@ final class AppModel: ObservableObject {
 
     var hasUntrustedDevice: Bool {
         discoveredDevices.contains { !isTrusted($0) }
+    }
+
+    private func updateCameraHealth() {
+        guard cameraHealthEnabled else { return }
+        cameraHealth.update(feedLive: feedState == .live,
+            bridgeAvailable: extensionBridge.available,
+            extensionEnabled: extensionManager.status == .active && setup.sinkRegistered)
+    }
+
+    func checkCameraOutput() {
+        updateCameraHealth()
+        cameraHealth.checkAgain()
     }
 
     var virtualCameraActive: Bool {
