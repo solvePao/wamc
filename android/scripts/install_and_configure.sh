@@ -8,6 +8,10 @@ echo "==> Building and installing WAMC on Android device..."
 cd "$ANDROID_DIR"
 ./gradlew installDebug
 
+echo "==> Granting runtime permissions (camera + notifications)..."
+adb shell pm grant com.androidwebcam.app android.permission.CAMERA || true
+adb shell pm grant com.androidwebcam.app android.permission.POST_NOTIFICATIONS || true
+
 echo "==> Setting default USB configuration to MTP (Transferring files / Android Auto)..."
 adb shell svc usb setScreenUnlockedFunctions mtp || true
 adb shell svc usb setFunctions mtp || true

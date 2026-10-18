@@ -66,6 +66,11 @@ struct ContentView: View {
             .pickerStyle(.segmented)
 
             HStack {
+                Toggle("Auto-connect on plug", isOn: $model.autoConnect)
+                Toggle("Auto-start camera", isOn: $model.autoStart)
+            }
+
+            HStack {
                 Button(model.connected ? "Disconnect" : "Connect") {
                     model.connected ? model.disconnect() : model.connect()
                 }

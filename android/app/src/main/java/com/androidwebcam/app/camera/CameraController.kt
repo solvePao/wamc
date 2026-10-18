@@ -81,16 +81,8 @@ class CameraController(context: Context) {
         }
     }
 
-    private fun determineDefaultCameraId(): String {
-        val mainBack = availableCameras.firstOrNull {
-            it.facing == CameraCharacteristics.LENS_FACING_BACK && it.lensType == LensType.MAIN
-        }
-        val anyBack = availableCameras.firstOrNull {
-            it.facing == CameraCharacteristics.LENS_FACING_BACK
-        }
-        val firstCam = availableCameras.firstOrNull()
-        return mainBack?.id ?: anyBack?.id ?: firstCam?.id ?: "0"
-    }
+    private fun determineDefaultCameraId(): String =
+        DefaultCamera.pickId(availableCameras, null) ?: "0"
 
     fun selectCamera(id: String) {
         if (availableCameras.any { it.id == id }) {

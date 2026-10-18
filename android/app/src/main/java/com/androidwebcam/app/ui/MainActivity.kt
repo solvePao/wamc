@@ -45,6 +45,8 @@ class MainActivity : Activity() {
     // Nullable so a layout missing this view degrades instead of crashing on startup.
     private var cameraSelector: Spinner? = null
     private var enhanceToggle: Switch? = null
+    private var autoStartToggle: Switch? = null
+    private val prefs by lazy { getSharedPreferences("wamc_prefs", MODE_PRIVATE) }
     private lateinit var previewView: SquareTextureView
     private lateinit var orientationLabel: TextView
     private var quarterTurns = 0
@@ -64,9 +66,10 @@ class MainActivity : Activity() {
                 runOnUiThread { updateCameraSelection(activeId) }
             }
             status.text = svc.uvcGuidance()
-            applyRotation(svc.rotationQuarterTurns)
+            applyRotation(svc.previewTurns())
             enhanceToggle?.isChecked = svc.enhancementEnabled
             updateCameraList(svc)
+            maybeAutoStart()
             if (intent?.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
                 svc.connectAccessory()
             }
@@ -105,6 +108,13 @@ class MainActivity : Activity() {
             service?.setEnhancementEnabled(isChecked)
         }
 
+        autoStartToggle = findViewById(R.id.autoStartToggle)
+        autoStartToggle?.isChecked = prefs.getBoolean(PREF_AUTOSTART, true)
+        autoStartToggle?.setOnCheckedChangeListener { _, isChecked ->
+            prefs.edit().putBoolean(PREF_AUTOSTART, isChecked).apply()
+            if (isChecked) maybeAutoStart()
+        }
+
         updateLayoutForOrientation(resources.configuration.orientation)
 
         previewView.surfaceTextureListener =
@@ -131,13 +141,7 @@ class MainActivity : Activity() {
                 svc.stopStreaming()
                 toggle.text = getString(R.string.start_streaming)
             } else if (hasCameraPermission()) {
-                val (w, h, q) = when (resolution.selectedItemPosition) {
-                    2 -> Triple(1280, 720, com.androidwebcam.app.camera.StreamQuality.BALANCED)
-                    1 -> Triple(1920, 1080, com.androidwebcam.app.camera.StreamQuality.HIGH)
-                    else -> Triple(1920, 1080, com.androidwebcam.app.camera.StreamQuality.BEST)
-                }
-                svc.startStreaming(w, h, 30, q)
-                toggle.text = getString(R.string.stop_streaming)
+                startStreamingFromUi()
             } else {
                 requestPermissions(arrayOf(Manifest.permission.CAMERA), REQ_CAMERA)
             }
@@ -152,7 +156,46 @@ class MainActivity : Activity() {
 
         setupUsbConfigCard()
 
+        // Started (not only bound) so the listener survives the activity and
+        // the service restarts sticky; streaming itself still needs a trigger.
+        startForegroundService(Intent(this, CameraStreamingService::class.java))
         bindService(Intent(this, CameraStreamingService::class.java), connection, BIND_AUTO_CREATE)
+    }
+
+    private fun autoStartEnabled(): Boolean =
+        prefs.getBoolean(PREF_AUTOSTART, true)
+
+    /** Shared tap path: starts with the spinner's quality, flips the button. */
+    private fun startStreamingFromUi() {
+        val svc = service ?: return
+        if (svc.streaming || !hasCameraPermission()) return
+        val spinner: Spinner? = findViewById(R.id.resolution)
+        val (w, h, q) = when (spinner?.selectedItemPosition) {
+            2 -> Triple(1280, 720, com.androidwebcam.app.camera.StreamQuality.BALANCED)
+            1 -> Triple(1920, 1080, com.androidwebcam.app.camera.StreamQuality.HIGH)
+            else -> Triple(1920, 1080, com.androidwebcam.app.camera.StreamQuality.BEST)
+        }
+        svc.startStreaming(w, h, 30, q)
+        if (::toggle.isInitialized) toggle.text = getString(R.string.stop_streaming)
+    }
+
+    /** No-tap start on open / after grant / when re-enabled. */
+    private fun maybeAutoStart() {
+        if (autoStartEnabled() && hasCameraPermission()) startStreamingFromUi()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Bind is sticky: resume without re-bind would otherwise sit idle.
+        maybeAutoStart()
+        syncToggle()
+    }
+
+    private fun syncToggle() {
+        if (!::toggle.isInitialized) return
+        toggle.text = getString(
+            if (service?.streaming == true) R.string.stop_streaming
+            else R.string.start_streaming)
     }
 
     /** Rotates the square preview; the same turns go to the Mac via CONFIG. */
@@ -219,6 +262,7 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_CAMERA && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             service?.let { updateCameraList(it) }
+            maybeAutoStart()
         }
     }
 
@@ -278,5 +322,6 @@ class MainActivity : Activity() {
     companion object {
         private const val REQ_CAMERA = 1
         private const val REQ_NOTIFY = 2
+        private const val PREF_AUTOSTART = "auto_start"
     }
 }

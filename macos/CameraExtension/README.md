@@ -23,7 +23,7 @@ cannot be validated from `swift build` alone.
 
 ## How frames flow
 
-`AndroidWebcamApp` decodes H.264 → `ExtensionBridge` enqueues CMSampleBuffers
+`AndroidWebcamApp` decodes H.264/HEVC → `ExtensionBridge` enqueues CMSampleBuffers
 into the extension's **sink** stream → `SinkStreamSource` stores the latest
 pixel buffer → `SourceStreamSource` publishes it at 30 FPS (dark placeholder
 while no phone is connected, so the camera never disappears mid-call).

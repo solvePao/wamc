@@ -163,6 +163,16 @@
                 android:textColor="#E2E8F0"
                 android:textSize="15sp" />
 
+            <Switch
+                android:id="@+id/autoStartToggle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:checked="true"
+                android:text="@string/auto_start"
+                android:textColor="#E2E8F0"
+                android:textSize="15sp" />
+
             <Button
                 android:id="@+id/toggle"
                 android:layout_width="match_parent"

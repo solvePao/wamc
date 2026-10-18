@@ -64,3 +64,54 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(policy.nextDelay(), 0.5)
     }
 }
+
+final class AutoStartPolicyTests: XCTestCase {
+
+    func testFreshPlugConnectsAndStarts() {
+        var p = AutoStartPolicy()
+        p.deviceListChanged(currentId: "RZCT40TFK9D")
+        XCTAssertTrue(p.shouldConnect(devicePresent: true, connected: false, autoConnect: true))
+        XCTAssertTrue(p.shouldAutoStart(autoStart: true))
+    }
+
+    func testNothingHappensWithoutDeviceOrWhenOff() {
+        var p = AutoStartPolicy()
+        XCTAssertFalse(p.shouldConnect(devicePresent: false, connected: false, autoConnect: true))
+        p.deviceListChanged(currentId: "X")
+        XCTAssertFalse(p.shouldConnect(devicePresent: true, connected: false, autoConnect: false))
+        XCTAssertFalse(p.shouldAutoStart(autoStart: false))
+    }
+
+    func testExplicitStopHoldsUntilReplug() {
+        var p = AutoStartPolicy()
+        p.deviceListChanged(currentId: "X")
+        p.didSendStart()
+        XCTAssertFalse(p.shouldAutoStart(autoStart: true)) // already asked
+        p.didSendStop()
+        XCTAssertFalse(p.shouldConnect(devicePresent: true, connected: false, autoConnect: true))
+        XCTAssertFalse(p.shouldAutoStart(autoStart: true))
+        p.deviceListChanged(currentId: nil) // unplug clears the latch…
+        p.deviceListChanged(currentId: "X") // …replug arrives fresh
+        XCTAssertTrue(p.shouldConnect(devicePresent: true, connected: false, autoConnect: true))
+        XCTAssertTrue(p.shouldAutoStart(autoStart: true))
+    }
+
+    func testTransientDropReasksWithoutLatch() {
+        var p = AutoStartPolicy()
+        p.deviceListChanged(currentId: "X")
+        p.didSendStart()
+        p.didDisconnect() // blip, not a decision
+        XCTAssertTrue(p.shouldAutoStart(autoStart: true))
+        p.manualDisconnect()
+        XCTAssertFalse(p.shouldAutoStart(autoStart: true))
+        XCTAssertFalse(p.shouldConnect(devicePresent: true, connected: false, autoConnect: true))
+    }
+
+    func testSameDeviceListDoesNotClearLatch() {
+        var p = AutoStartPolicy()
+        p.deviceListChanged(currentId: "X")
+        p.didSendStop()
+        p.deviceListChanged(currentId: "X")
+        XCTAssertFalse(p.shouldAutoStart(autoStart: true))
+    }
+}

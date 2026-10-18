@@ -12,11 +12,11 @@ SM-E236B, Android 14). Decisions: [docs/DECISIONS.md](docs/DECISIONS.md).
 - `android/` — Kotlin app: Camera2 → MediaCodec H.264 → ADB-TCP / AOA (`Transport` interface)
 - `macos/` — SwiftPM app: receiver → VideoToolbox → preview + menu bar; `CameraExtension/` holds the CoreMediaIO virtual-camera sources (Xcode target)
 - `shared/protocol/PROTOCOL.md` — AWC1 wire format, golden-vector tested both sides
-- `AI_AGENT_GUIDE.md` — Operations runbook for AI agents: clean, build APK, build macOS DMG, and install both sides
+- `iterative-testing.md` — Operations runbook for AI agents: clean, build APK, build macOS DMG, and install both sides
 
 ## Build and test
 
-Android (JDK 17, SDK 35 — see `ANDROID_SETUP.md`):
+Android (JDK 17, SDK 35 — see `iterative-testing.md` for the full runbook):
 
 ```bash
 cd android
@@ -39,14 +39,11 @@ Virtual camera: follow `macos/CameraExtension/README.md` once in Xcode
 
 ## Use
 
-1. Plug the Samsung phone in by USB, open the Android app, tap **Start Streaming**.
-2. On the Mac app: **Connect**, then **Start camera**. Pick Best (HEVC when negotiated, else max-rate AVC), 1080p high, or 720p balanced.
+1. Plug the Samsung phone in by USB and open the Android app — it starts streaming the front camera on its own (toggle **Auto-start** off to go manual).
+2. On the Mac app: it connects on plug and starts the camera by itself. Pick Best (HEVC when negotiated, else max-rate AVC), 1080p high, or 720p balanced. **Stop** stays stopped until replug.
 3. In your meeting app select **WAMC Camera** (after extension setup);
    until then, verify the feed in the Mac preview window.
 
 Unplugging keeps the virtual camera registered on a placeholder slate;
 reconnect resumes automatically (backoff 0.5s → 8s). Diagnostics (FPS,
 bitrate, drops) show in the app window and menu bar. No audio by design.
-
-
-muse resume 01a14af5-9330-7831-97c2-dc69ffca9917

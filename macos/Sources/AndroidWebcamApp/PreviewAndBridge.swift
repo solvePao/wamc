@@ -21,7 +21,9 @@ func makeImageSampleBuffer(_ pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
     return sample
 }
 
-/// Renders decoded CVPixelBuffers into an AVSampleBufferDisplayLayer.
+/// Renders decoded frames into an AVSampleBufferDisplayLayer.
+/// Takes the already-wrapped sample: the caller wraps once per frame and
+/// shares it with the extension bridge.
 final class PreviewRenderer {
     let layer = AVSampleBufferDisplayLayer()
 
@@ -30,10 +32,9 @@ final class PreviewRenderer {
         layer.backgroundColor = CGColor(gray: 0.08, alpha: 1)
     }
 
-    func enqueue(_ pixelBuffer: CVPixelBuffer) {
+    func enqueue(_ sample: CMSampleBuffer) {
         if layer.status == .failed { layer.flush() }
-        guard layer.isReadyForMoreMediaData,
-              let sample = makeImageSampleBuffer(pixelBuffer) else { return }
+        guard layer.isReadyForMoreMediaData else { return }
         layer.enqueue(sample)
     }
 }
@@ -123,7 +124,7 @@ final class ExtensionBridge {
         return value.takeRetainedValue() as String
     }
 
-    func send(_ pixelBuffer: CVPixelBuffer) {
+    func send(_ sample: CMSampleBuffer) {
         if !available || bufferQueue == nil {
             let now = ProcessInfo.processInfo.systemUptime
             if now - lastDiscoveryAttempt > 2.0 {
@@ -131,8 +132,7 @@ final class ExtensionBridge {
                 discoverSink()
             }
         }
-        guard available, let bufferQueue,
-              let sample = makeImageSampleBuffer(pixelBuffer) else { return }
+        guard available, let bufferQueue else { return }
         if CMSimpleQueueGetCount(bufferQueue) < CMSimpleQueueGetCapacity(bufferQueue) {
             CMSimpleQueueEnqueue(bufferQueue, element: Unmanaged.passRetained(sample).toOpaque())
         }

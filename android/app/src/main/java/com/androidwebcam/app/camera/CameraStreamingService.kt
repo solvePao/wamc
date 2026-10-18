@@ -10,6 +10,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.view.Surface
+import android.view.WindowManager
 import com.androidwebcam.app.protocol.WireProtocol
 import com.androidwebcam.app.transport.AdbSocketTransport
 import com.androidwebcam.app.transport.NativeUvcSupport
@@ -70,6 +71,26 @@ class CameraStreamingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Started (not only bound): idle-listen so the Mac can always signal,
+        // and restart sticky if the process dies.
+        // Foreground only when allowed: without the CAMERA grant (fresh
+        // install) or an eligible state, startForeground() on our manifest
+        // camera-type service throws SecurityException — listen
+        // unforegrounded instead of crash-looping; streaming foregrounds
+        // once the app is opened and eligible.
+        if (hasCameraPermission()) {
+            runCatching { showIdleNotification() }.onFailure {
+                android.util.Log.w("AWC", "idle foreground refused; listening backgrounded", it)
+            }
+        }
+        return START_STICKY
+    }
+
+    private fun hasCameraPermission(): Boolean =
+        checkSelfPermission(android.Manifest.permission.CAMERA) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+
     override fun onCreate() {
         super.onCreate()
         savedCameraId = prefs.getString(PREF_CAMERA_ID, null)
@@ -96,12 +117,7 @@ class CameraStreamingService : Service() {
 
     val currentCameraId: String
         get() = camera?.activeCameraId
-            ?: savedCameraId
-            ?: getAvailableCameras().firstOrNull {
-                it.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK &&
-                    it.lensType == LensType.MAIN
-            }?.id
-            ?: getAvailableCameras().firstOrNull()?.id
+            ?: DefaultCamera.pickId(getAvailableCameras(), savedCameraId)
             ?: "0"
 
     fun selectCamera(cameraId: String) {
@@ -154,7 +170,10 @@ class CameraStreamingService : Service() {
         camera?.closeCapture()
         encoder?.stop(); encoder = null
         camera?.close(); camera = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        // Back to idle listener (service stays started); streaming needs a trigger.
+        // A Mac-commanded stop can arrive while backgrounded/ineligible, where
+        // foregrounding throws — never let that escape the reader thread.
+        runCatching { showIdleNotification() }
         emitStatus()
     }
 
@@ -171,32 +190,64 @@ class CameraStreamingService : Service() {
         if (streaming) restartPipeline()
     }
 
-    /** Cycles 0° → 90° → 180° → 270°; Mac applies it to decoded frames. */
+    /** Manual taps on top of sensor/display compensation; Mac renders the total. */
     fun rotate() {
         rotationQuarterTurns = (rotationQuarterTurns + 1) % 4
         resendConfig()
         encoder?.requestKeyframe()
-        rotationListener?.invoke(rotationQuarterTurns)
+        rotationListener?.invoke(previewTurns())
     }
 
     fun setRotation(quarterTurns: Int) {
         rotationQuarterTurns = quarterTurns and 3
         resendConfig()
         encoder?.requestKeyframe()
-        rotationListener?.invoke(rotationQuarterTurns)
+        rotationListener?.invoke(previewTurns())
     }
+
+    /** Preview matrix turns: HAL output is already upright, else match the Mac. */
+    fun previewTurns(): Int = rotationSetup().previewTurns
+
+    private data class RotationSetup(
+        val halMode: Int?,
+        val macRotation: Int,
+        val previewTurns: Int,
+    )
+
+    /**
+     * Total orientation = sensor/display/facing compensation plus manual taps.
+     * HAL rotates on-device when supported (preview and encoder arrive upright);
+     * otherwise the total travels in CONFIG and the Mac renders it.
+     */
+    private fun rotationSetup(): RotationSetup {
+        val controller = camera
+            ?: return RotationSetup(null, rotationQuarterTurns, rotationQuarterTurns)
+        val sensor = runCatching {
+            controller.sensorOrientation(controller.activeCameraId)
+        }.getOrDefault(0)
+        val total = CameraOrientation.totalTurns(
+            sensor, deviceDegrees(), !controller.facingBack, rotationQuarterTurns)
+        val plan = RotationPlanner.plan(
+            total, controller.rotateAndCropModes(controller.activeCameraId))
+        val preview = if (plan.halRotateMode != null) 0 else total
+        return RotationSetup(plan.halRotateMode, plan.configRotation, preview)
+    }
+
+    private fun deviceDegrees(): Int = runCatching {
+        val wm = getSystemService(WindowManager::class.java) ?: return 0
+        @Suppress("DEPRECATION")
+        when (wm.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+    }.getOrDefault(0)
 
     private fun resendConfig() {
         val sets = lastParamSets ?: return
         if (lastWidth == 0 || sets.size < 2) return
-        // HAL rotation reports 0 (already upright); metadata path echoes turns.
-        val controller = camera
-        val effectiveRotation = if (controller != null) {
-            RotationPlanner.plan(
-                rotationQuarterTurns,
-                controller.rotateAndCropModes(controller.activeCameraId),
-            ).configRotation
-        } else rotationQuarterTurns
+        val effectiveRotation = rotationSetup().macRotation
         hub.sendConfigV2(WireProtocol.encodeConfigV2(
             lastCodec, sets, lastWidth, lastHeight, fps, effectiveRotation))
         lastSentSets = sets; lastSentCodec = lastCodec
@@ -250,15 +301,14 @@ class CameraStreamingService : Service() {
                 "quality=${quality.key} ${profile.width}x${profile.height}@${profile.fps} " +
                 "${profile.bitrateBps / 1_000_000}Mbps gop=${profile.iFrameIntervalSec}s " +
                 "(want=$requestedCodec phone=$phoneCodecs peer=$peerCodecs)")
-        val rotationPlan = RotationPlanner.plan(
-            rotationQuarterTurns, controller.rotateAndCropModes(controller.activeCameraId))
+        val rs = rotationSetup()
         val enc = VideoEncoder(profile,
             onConfig = { sps, pps ->
                 lastSps = sps; lastPps = pps
                 lastWidth = size.width; lastHeight = size.height
             },
             onConfigSets = { sets ->
-                val rotation = rotationPlan.configRotation
+                val rotation = rs.macRotation
                 val duplicate = lastSentSets?.let { prev ->
                     prev.size == sets.size &&
                         prev.zip(sets).all { (a, b) -> a.contentEquals(b) }
@@ -284,7 +334,8 @@ class CameraStreamingService : Service() {
             onFrame = { data, isKey, pts -> hub.sendVideo(data, isKey, pts) })
         encoder = enc
         enc.start()
-        controller.open(previewSurface, enc.inputSurface, width, height, rotationPlan.halRotateMode)
+        controller.open(previewSurface, enc.inputSurface, width, height, rs.halMode)
+        rotationListener?.invoke(rs.previewTurns)
         sendHello()
         emitStatus()
     }
@@ -352,16 +403,25 @@ class CameraStreamingService : Service() {
         statusListener?.invoke(state)
     }
 
-    private fun startForegroundNotification() {
+    private fun notification(text: String): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL, "Camera streaming", NotificationManager.IMPORTANCE_LOW))
-        val notification: Notification = Notification.Builder(this, CHANNEL)
+        return Notification.Builder(this, CHANNEL)
             .setContentTitle("WAMC")
-            .setContentText("Camera is streaming to your Mac")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.presence_video_online)
             .setOngoing(true)
             .build()
+    }
+
+    /** Idle listener: no camera, so no camera service type claimed. */
+    private fun showIdleNotification() {
+        startForeground(ID, notification("WAMC ready — connect USB to stream to your Mac"))
+    }
+
+    private fun startForegroundNotification() {
+        val notification = notification("Camera is streaming to your Mac")
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
         } else {

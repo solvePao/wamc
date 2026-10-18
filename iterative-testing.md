@@ -54,7 +54,7 @@ Coordinator: launch both prompts in the same parallel batch.
 **Agent-Android prompt:**
 
 ```text
-Follow AI_AGENT_GUIDE.md, Android track only (§1 Android env, §2.1 → §2.2 → §2.3).
+Follow iterative-testing.md, Android track only (§1 Android env, §2.1 → §2.2 → §2.3).
 Do not touch macOS paths (/Applications/WAMC.app, macos/, WAMC.dmg) or run
 macOS sections (§3–§5). Use a private shell from the repo root. Finish by
 running the §6.1 Android checks and reporting pass/fail per check.
@@ -63,7 +63,7 @@ running the §6.1 Android checks and reporting pass/fail per check.
 **Agent-macOS prompt:**
 
 ```text
-Follow AI_AGENT_GUIDE.md, macOS track only (§1 macOS env, §3.1 → §4 → §5).
+Follow iterative-testing.md, macOS track only (§1 macOS env, §3.1 → §4 → §5).
 Do not touch Android paths (android/, WAMC.apk) and do not run adb or §2.
 Use a private shell from the repo root. Build the DMG (§5) only after your §4
 install succeeds. Finish by running the §6.2 + §6.3 checks and reporting

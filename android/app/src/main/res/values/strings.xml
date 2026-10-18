@@ -6,6 +6,7 @@
     <string name="switch_camera">Switch Camera</string>
     <string name="rotate">Rotate 90°</string>
     <string name="enhance_filter">Enhance · sharpness + denoise</string>
+    <string name="auto_start">Auto-start streaming on open</string>
     <string name="channel_name">Camera streaming</string>
     <string name="usb_setup_title">Default USB Configuration</string>
     <string name="usb_setup_desc">Set default USB mode to \'Transferring files / Android Auto\' for seamless connection when plugged into Mac.</string>

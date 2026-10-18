@@ -4,6 +4,24 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import kotlin.math.sqrt
 
+/**
+ * Front-first default pick: webcam use favors the front camera. An explicit
+ * saved choice always wins; otherwise front, then main back, then anything.
+ * Pure data in/out, covered by unit tests.
+ */
+object DefaultCamera {
+    fun pickId(cameras: List<CameraInfo>, savedId: String?): String? {
+        if (savedId != null && cameras.any { it.id == savedId }) return savedId
+        cameras.firstOrNull { it.facing == CameraCharacteristics.LENS_FACING_FRONT }?.let {
+            return it.id
+        }
+        cameras.firstOrNull {
+            it.facing == CameraCharacteristics.LENS_FACING_BACK && it.lensType == LensType.MAIN
+        }?.let { return it.id }
+        return cameras.firstOrNull()?.id
+    }
+}
+
 enum class LensType {
     MAIN,
     ULTRA_WIDE,

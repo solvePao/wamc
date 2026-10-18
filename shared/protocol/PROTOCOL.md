@@ -21,14 +21,16 @@ and Android Open Accessory bulk streams. All integers are big-endian.
 - **CONFIG** (v1, unchanged): `spsLen u16 | sps | ppsLen u16 | pps |
   width u16 | height u16 | fps u8 | rotation u8`.
   `rotation` is quarter-turns clockwise (0=0°, 1=90°, 2=180°, 3=270°) the
-  receiver must apply to decoded frames. Sent before the first frame, on
-  every format change, and whenever the user taps Rotate on the phone.
+  receiver must apply to decoded frames. It is the total orientation:
+  sensor/display/facing compensation plus manual Rotate taps (Android
+  `CameraOrientation.totalTurns`). Sent before the first frame, on every
+  format change, and whenever orientation or taps change it.
 - **CONFIG2** (type `5`, new): `codec u8 | count u8 | (len u16 + bytes)* |
   width u16 | height u16 | fps u8 | rotation u8`.
   `codec`: `0`=AVC (sets are sps,pps), `1`=HEVC (sets are vps,sps,pps in
-  that order). `rotation = 0` means frames arrive upright — the phone
-  rotated in hardware (HAL rotate-and-crop) and the receiver forwards
-  decoded frames untouched. Sent before legacy CONFIG on every format
+  that order). `rotation = 0` means frames arrive upright — via HAL
+  rotate-and-crop or because the compensated total is already 0 — and the
+  receiver forwards decoded frames untouched. Sent before legacy CONFIG on every format
   change; v1 receivers skip it as an unknown type via payload length.
 - **CONTROL / HELLO**: UTF-8 `key=value;key=value`, e.g.
   `cmd=start;facing=back;width=1920;height=1080;fps=30`,

@@ -28,11 +28,19 @@ final class AppModel: ObservableObject {
     @Published var deviceInfo: [String: String] = [:]
     @Published var stats = StreamStats()
     @Published var statusText = "Plug in your Samsung phone with USB to begin."
-    @Published var facingBack = true
+    /// Phone streams the front camera by default; this mirrors that.
+    @Published var facingBack = false
     /// Best = HEVC/VBR ceiling when negotiated, else max-rate AVC.
     @Published var qualityMode: QualityMode = .best
     @Published var codecLabel = "H.264"
     @Published var rotationQuarterTurns = 0
+    /// Both default ON; persisted. Off = fully manual Connect/Start.
+    @Published var autoConnect = UserDefaults.standard.object(forKey: "wamc.autoConnect") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoConnect, forKey: "wamc.autoConnect") }
+    }
+    @Published var autoStart = UserDefaults.standard.object(forKey: "wamc.autoStart") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoStart, forKey: "wamc.autoStart") }
+    }
 
     let renderer = PreviewRenderer()
     let extensionManager = CameraExtensionManager()
@@ -40,6 +48,8 @@ final class AppModel: ObservableObject {
     private let decoder = H264Decoder()
     private let frameQueue = LatestFrameQueue()
     private let extensionBridge = ExtensionBridge()
+    private var autoPolicy = AutoStartPolicy()
+    private var watchdogTimer: Timer?
     private var displayTimer: Timer?
     private let streamLock = NSLock()
     private var lastConfigDesc: String?
@@ -108,8 +118,12 @@ final class AppModel: ObservableObject {
                         ("configV2", "1"),
                     ])
                     self.receiver.sendControl([("cmd", "requestKeyframe")])
+                    if self.autoPolicy.shouldAutoStart(autoStart: self.autoStart) {
+                        self.sendStart()
+                    }
                 } else {
                     self.stats.connectedSince = nil
+                    self.autoPolicy.didDisconnect()
                     self.statusText = "Disconnected. Reconnecting…"
                 }
             }
@@ -132,13 +146,18 @@ final class AppModel: ObservableObject {
                 // (CONFIG rotation 0), so forward the buffer untouched.
                 let out = self.rotationQuarterTurns == 0 ? frame
                     : FrameRotation.rotate(frame, quarterTurns: self.rotationQuarterTurns)
-                self.renderer.enqueue(out)
-                self.extensionBridge.send(out)
+                // Wrap once; preview and bridge share the same sample.
+                guard let sample = makeImageSampleBuffer(out) else { return }
+                self.renderer.enqueue(sample)
+                self.extensionBridge.send(sample)
                 self.objectWillChange.send()
             }
         }
         refreshDevices()
         connect()
+        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) {
+            [weak self] _ in self?.pollDevices()
+        }
     }
 
     func refreshDevices() {
@@ -161,7 +180,35 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Plug watchdog: runs forever, cheap (`adb devices` ~2.5 s).
+    /// Never touches USB mode here — that stays a manual/explicit action.
+    private func pollDevices() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let found = DeviceDiscovery.listAndroidDevices()
+            let uvc = DeviceDiscovery.nativeUVCWebcams()
+            Task { @MainActor in
+                guard let self else { return }
+                self.devices = found
+                self.nativeWebcams = uvc
+                let currentId = found.first(where: { $0.state == "device" })?.id
+                self.autoPolicy.deviceListChanged(currentId: currentId)
+                if self.autoPolicy.shouldConnect(devicePresent: currentId != nil,
+                                                 connected: self.connected,
+                                                 autoConnect: self.autoConnect) {
+                    self.doConnect()
+                }
+                self.objectWillChange.send()
+            }
+        }
+    }
+
+    /// Manual Connect button: clears the Stop latch, then connects.
     func connect() {
+        autoPolicy.manualConnect()
+        doConnect()
+    }
+
+    private func doConnect() {
         DeviceDiscovery.configureDefaultUsbMode()
         DeviceDiscovery.forwardPort()
         receiver.start()
@@ -169,6 +216,7 @@ final class AppModel: ObservableObject {
     }
 
     func disconnect() {
+        autoPolicy.manualDisconnect()
         receiver.stop()
         DeviceDiscovery.removeForward()
         decoder.invalidate()
@@ -179,6 +227,7 @@ final class AppModel: ObservableObject {
     }
 
     func sendStart() {
+        autoPolicy.didSendStart()
         codecLabel = "H.264" // replaced by CONFIG once the stream describes itself
         resetLastConfigDesc()
         receiver.sendControl([
@@ -193,7 +242,10 @@ final class AppModel: ObservableObject {
         ])
     }
 
-    func sendStop() { receiver.sendControl([("cmd", "stop")]) }
+    func sendStop() {
+        autoPolicy.didSendStop()
+        receiver.sendControl([("cmd", "stop")])
+    }
 
     func switchCamera() {
         facingBack.toggle()
