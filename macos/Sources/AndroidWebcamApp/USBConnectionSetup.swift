@@ -2,8 +2,13 @@ import AndroidWebcamCore
 import Darwin
 import Foundation
 
+protocol USBConnectionPreparing: AnyObject, Sendable {
+    func cancel()
+    func prepare(preferredSerial: String?) throws -> USBConnectionSetup.PreparedConnection
+}
+
 /// Performs one cancellable USB setup on a background queue.
-final class USBConnectionSetup: @unchecked Sendable {
+final class USBConnectionSetup: USBConnectionPreparing, @unchecked Sendable {
     struct PreparedConnection: Sendable {
         let serial: String
         let port: UInt16
@@ -156,6 +161,9 @@ final class ADBCommandRunner: ADBCommandExecuting, @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
     private var activeProcess: Process?
+    private let onStart: @Sendable () -> Void
+
+    init(onStart: @escaping @Sendable () -> Void = {}) { self.onStart = onStart }
 
     func cancel() {
         lock.lock()
@@ -195,6 +203,7 @@ final class ADBCommandRunner: ADBCommandExecuting, @unchecked Sendable {
             lock.unlock()
             throw error
         }
+        onStart()
         defer {
             lock.lock()
             activeProcess = nil

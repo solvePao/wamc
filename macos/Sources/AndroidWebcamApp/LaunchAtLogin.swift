@@ -3,19 +3,34 @@ import ServiceManagement
 import OSLog
 
 @MainActor
-protocol LoginItemServicing {
+protocol LoginItemRegistering {
     var status: SMAppService.Status { get }
     func register() throws
     func unregister() async throws
-    func openLoginItemsSettings()
 }
 
 @MainActor
-private struct SystemLoginItemService: LoginItemServicing {
-    var status: SMAppService.Status { SMAppService.mainApp.status }
-    func register() throws { try SMAppService.mainApp.register() }
-    func unregister() async throws { try await SMAppService.mainApp.unregister() }
-    func openLoginItemsSettings() { SMAppService.openSystemSettingsLoginItems() }
+protocol LoginItemServicing: LoginItemRegistering {
+    func openLoginItemsSettings()
+}
+
+extension SMAppService: LoginItemRegistering {}
+
+@MainActor
+struct SystemLoginItemService: LoginItemServicing {
+    private let registration: LoginItemRegistering
+    private let openSettings: @MainActor () -> Void
+
+    init(registration: LoginItemRegistering = SMAppService.mainApp,
+         openSettings: @escaping @MainActor () -> Void = SMAppService.openSystemSettingsLoginItems) {
+        self.registration = registration
+        self.openSettings = openSettings
+    }
+
+    var status: SMAppService.Status { registration.status }
+    func register() throws { try registration.register() }
+    func unregister() async throws { try await registration.unregister() }
+    func openLoginItemsSettings() { openSettings() }
 }
 
 /// Launch-at-login via `SMAppService.mainApp` (macOS 13+; app targets 14+).

@@ -14,8 +14,8 @@ data class AndroidRelease(val version: String, val build: Long, val asset: Strin
 /** Only release assets returned by the configured public repository are downloadable. */
 class ReleaseRepository(private val connect: (String) -> HttpURLConnection = {
     URL(it).openConnection() as HttpURLConnection
-}) {
-    fun latest(installedBuild: Long, sdk: Int): AndroidRelease? {
+}) : UpdateReleaseSource {
+    override fun latest(installedBuild: Long, sdk: Int): AndroidRelease? {
         val release = JSONObject(readText("https://api.github.com/repos/solvePao/wamc-releases/releases/latest"))
         if (release.optBoolean("draft") || release.optBoolean("prerelease")) return null
         val tag = release.getString("tag_name")
@@ -29,7 +29,7 @@ class ReleaseRepository(private val connect: (String) -> HttpURLConnection = {
         return parseMetadata(readText(metadataUrl), tag, urls, installedBuild, sdk)
     }
 
-    fun download(release: AndroidRelease, target: File, cancelled: AtomicBoolean, progress: (Int) -> Unit) {
+    override fun download(release: AndroidRelease, target: File, cancelled: AtomicBoolean, progress: (Int) -> Unit) {
         val connection = connection(release.downloadUrl)
         try {
             require(connection.responseCode == 200) { "Download failed (HTTP ${connection.responseCode})" }

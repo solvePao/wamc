@@ -7,7 +7,11 @@ targets:
     platform: macOS
     deploymentTarget: "14.0"
     sources:
+      - ../Sources/AndroidWebcamCore/CameraHealthSnapshot.swift
       - ExtensionMain.swift
+      - ExtensionLogger.swift
+      - CameraStreamTimer.swift
+      - CameraMediaFactory.swift
       - ProviderSource.swift
       - DeviceSource.swift
       - StreamSources.swift

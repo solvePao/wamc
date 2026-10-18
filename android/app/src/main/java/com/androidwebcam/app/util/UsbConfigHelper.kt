@@ -41,9 +41,11 @@ object UsbConfigHelper {
      * Attempts to execute the privileged USB mode switch via root (su)
      * setting both the persistent screen-unlocked default functions and active functions.
      */
-    fun tryConfigureViaRoot(): Boolean {
+    fun tryConfigureViaRoot(): Boolean = tryConfigureViaRoot { Runtime.getRuntime().exec("su") }
+
+    internal fun tryConfigureViaRoot(startProcess: () -> Process): Boolean {
         return try {
-            val process = Runtime.getRuntime().exec("su")
+            val process = startProcess()
             DataOutputStream(process.outputStream).use { os ->
                 os.writeBytes("svc usb setScreenUnlockedFunctions mtp\n")
                 os.writeBytes("svc usb setFunctions mtp\n")

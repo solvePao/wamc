@@ -69,16 +69,27 @@ final class ConnectionController: ObservableObject {
     var onHello: (([String: String], Bool) -> Void)?
     var onStreamEvent: ((StreamReceiver.Event) -> Void)?
 
+    private let connectionTimeout: Duration
+    private let stopTimeout: Duration
     private let receiver: StreamTransport
     private var attempt = UUID()
     private var timeout: Task<Void, Never>?
-    private var usbSetup: USBConnectionSetup?
+    private var usbSetup: (any USBConnectionPreparing)?
+    private let makeUSBSetup: (TimeInterval) -> any USBConnectionPreparing
+    private let removeForward: @Sendable (String, UInt16) -> Void
     private var forwarded: USBConnectionSetup.PreparedConnection?
     private var blockedTargets: Set<String> = []
     private var availableUSBKeys: Set<String> = []
     private var disconnectCompletions: [() -> Void] = []
 
-    init(receiver: StreamTransport = StreamReceiver()) {
+    init(receiver: StreamTransport = StreamReceiver(),
+         connectionTimeout: Duration = .seconds(5), stopTimeout: Duration = .milliseconds(500),
+         makeUSBSetup: @escaping (TimeInterval) -> any USBConnectionPreparing = { USBConnectionSetup(deadline: $0) },
+         removeForward: @escaping @Sendable (String, UInt16) -> Void = USBConnectionSetup.removeForward) {
+        self.makeUSBSetup = makeUSBSetup
+        self.removeForward = removeForward
+        self.connectionTimeout = connectionTimeout
+        self.stopTimeout = stopTimeout
         self.receiver = receiver
         receiver.onEvent = { [weak self] attempt, event in
             DispatchQueue.main.async { self?.receive(event, attempt: attempt) }
@@ -117,14 +128,15 @@ final class ConnectionController: ObservableObject {
         armTimeout(attempt: id, message: "Could not connect to \(target.label) within 5 seconds.")
         switch target {
         case .usb(let serial):
-            let setup = USBConnectionSetup(deadline: deadline)
+            let setup = makeUSBSetup(deadline)
+            let removeForward = self.removeForward
             usbSetup = setup
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let result = Result { try setup.prepare(preferredSerial: serial) }
                 Task { @MainActor in
                     guard let self, self.attempt == id, self.state.isConnecting else {
                         if case .success(let prepared) = result {
-                            USBConnectionSetup.removeForward(serial: prepared.serial, port: prepared.port)
+                            removeForward(prepared.serial, prepared.port)
                         }
                         return
                     }
@@ -185,8 +197,9 @@ final class ConnectionController: ObservableObject {
             receiver.sendControl([("cmd", "stop")], attempt: id) { [weak self] in
                 Task { @MainActor in self?.finishDisconnect(attempt: id) }
             }
+            let delay = stopTimeout
             timeout = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 500_000_000)
+                try? await Task.sleep(for: delay)
                 guard !Task.isCancelled else { return }
                 self?.finishDisconnect(attempt: id)
             }
@@ -235,8 +248,9 @@ final class ConnectionController: ObservableObject {
 
     private func armTimeout(attempt id: UUID, message: String) {
         timeout?.cancel()
+        let delay = connectionTimeout
         timeout = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self, self.attempt == id, self.state.isConnecting else { return }
             self.fail(message)
         }
@@ -270,7 +284,7 @@ final class ConnectionController: ObservableObject {
         usbSetup = nil
         receiver.stop()
         if let forwarded {
-            USBConnectionSetup.removeForward(serial: forwarded.serial, port: forwarded.port)
+            removeForward(forwarded.serial, forwarded.port)
         }
         forwarded = nil
     }

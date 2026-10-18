@@ -9,7 +9,7 @@ import AndroidWebcamCore
 @MainActor
 final class ViewConstructionTests: XCTestCase {
     func testMainWindowViewsBuildFromAnIdleModel() {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
 
         _ = ContentView(model: model).body
         let preview = NSHostingView(rootView: PreviewPane(model: model))
@@ -22,18 +22,18 @@ final class ViewConstructionTests: XCTestCase {
     }
 
     func testApplicationSceneBuildsWithoutStartingExternalServices() {
-        _ = WAMCApplication(startServices: false).body
+        _ = WAMCApplication(preferences: isolatedDefaults(), startServices: false).body
     }
 
     func testSetupAndMenuViewsBuildWhileServicesAreIdle() {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
 
         _ = SetupView(model: model).body
         _ = MenuContent(model: model).body
     }
 
     func testMenuSnapshotCapturesWifiAndManualSourcesAndStableBodyBuilds() {
-        let model = AppModel(startServices: false)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false)
         let phone = DiscoveredDevice(id: "view-phone", instanceName: "Pixel",
                                      model: "Pixel", brand: "Google", sdk: 35,
                                      port: 27183, version: 2)
@@ -51,7 +51,7 @@ final class ViewConstructionTests: XCTestCase {
         let stable = StableMenuContent(model: model, updater: nil, snapshot: snapshot)
         XCTAssertTrue(stable == StableMenuContent(model: model, updater: nil, snapshot: snapshot))
         _ = stable.body
-        XCTAssertFalse(stable == StableMenuContent(model: AppModel(startServices: false), updater: nil,
+        XCTAssertFalse(stable == StableMenuContent(model: AppModel(preferences: isolatedDefaults(), startServices: false), updater: nil,
                                                     snapshot: snapshot))
     }
 
@@ -72,7 +72,7 @@ final class ViewConstructionTests: XCTestCase {
                                      port: 27183, version: 2)
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = AppModel(startServices: false, connection: connection)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false, connection: connection)
         connection.connect(to: .wifi(phone),
                            endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: 27183)!),
                            manual: true)
@@ -106,14 +106,16 @@ final class ViewConstructionTests: XCTestCase {
         for (installed, issue, extensionStatus, sinkRegistered) in states {
             let manager = CameraExtensionManager()
             manager.status = extensionStatus
-            let setup = SetupModel(environment: ViewSetupEnvironment(sinkRegistered: sinkRegistered),
+            let setup = SetupModel(preferences: isolatedDefaults(), environment: ViewSetupEnvironment(sinkRegistered: sinkRegistered),
                                    packageInspector: ViewSetupPackageInspector(installed: installed,
                                                                               issue: issue),
                                    extensionManager: manager,
                                    bundleURL: URL(fileURLWithPath: "/Applications/WAMC.app"))
             setup.refresh()
-            let model = AppModel(startServices: false, setupModel: setup)
+            let model = AppModel(preferences: isolatedDefaults(), startServices: false, setupModel: setup)
             let host = NSHostingView(rootView: SetupView(model: model))
+            host.frame = NSRect(x: 0, y: 0, width: 700, height: 900)
+            host.layoutSubtreeIfNeeded()
 
             XCTAssertGreaterThan(host.fittingSize.height, 0)
         }
@@ -155,7 +157,7 @@ extension ViewConstructionTests {
     func testSourceControlsRenderTrustedNewAndManualSources() {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = AppModel(startServices: false, connection: connection)
+        let model = AppModel(preferences: isolatedDefaults(), startServices: false, connection: connection)
         let trusted = DiscoveredDevice(id: "view-trusted-\(UUID().uuidString)", instanceName: "Trusted Pixel",
                                        model: "Pixel", brand: "Google", sdk: 35, port: 27183, version: 2)
         let fresh = DiscoveredDevice(id: "view-new-\(UUID().uuidString)", instanceName: "New Pixel",

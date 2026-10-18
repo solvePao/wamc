@@ -18,19 +18,30 @@ SM-E236B, Android 14). Decisions: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Build and test
 
+Run all tests and exact production coverage gates locally:
+
+```bash
+python3 scripts/testing/run_tests.py
+```
+
+The runner starts Android, macOS, and tooling suites concurrently and saves
+separate logs and timing reports. See [local testing](docs/TESTING.md) for worker
+overrides and repeated runs. GitHub Actions builds and packages artifacts only;
+tests and coverage checks are not run in either GitHub workflow.
+
 Android (JDK 17, SDK 35 — see `iterative-testing.md` for the full runbook):
 
 ```bash
 cd android
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)
-./gradlew testDebugUnitTest assembleDebug
+./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 macOS:
 
 ```bash
-(cd macos && xcrun swift test) > /tmp/wamc-swift-tests.log 2>&1
+python3 scripts/testing/run_tests.py --platform macos > /tmp/wamc-swift-tests.log 2>&1
 ./macos/scripts/build_and_install.sh > /tmp/wamc-build.log 2>&1
 ./macos/scripts/build_dmg.sh > /tmp/wamc-dmg.log 2>&1
 ```
@@ -66,8 +77,22 @@ The current DMG is a development build for registered Macs.
 **Preview window:** Open WAMC from the menu bar for a large camera preview with a compact control panel. Camera actions and quality are at the top; Connections contains USB and trusted Wi-Fi phones. Expand Manual address for a direct connection, Preferences for automatic behavior, and Diagnostics beneath the preview for stream details. Setup remains available from the toolbar and menu bar. The window follows macOS light/dark appearance, and closing it keeps virtual-camera delivery running. On macOS 26 and later, camera actions and expandable headers use Liquid Glass; macOS 14–15 use native materials and bordered controls. Start/Stop and camera-switch/rotate actions form two aligned rows. Click anywhere on an expandable header to open it with a short animation (or immediately with Reduce Motion). Disconnected previews detach and clear the last video image. Live statistics publish through a separate display-only store; quality and menu-bar controls also compare value snapshots so open menus keep tracking clicks.
 
 In your meeting app select **Android Camera** (after extension setup).
-Confirm moving video in FaceTime or Photo Booth; the Mac preview alone
-only verifies phone transport and decoding.
+WAMC automatically checks camera output after live phone video begins. **Ready
+for apps** means a short AVFoundation readback received at least three advancing
+video samples while the extension reported newly published phone frames. The
+waiting placeholder cannot pass this check. **App usage** separately reports
+whether macOS sees another app using Android Camera; WAMC's own check does not
+count as another app. No video is recorded by the check.
+
+Allow WAMC camera access in Setup & Diagnostics when requested. If verification
+fails, use **Check again** after checking the phone feed and camera-extension
+setup. An older extension without health reporting needs a WAMC update. Stopping
+or losing the feed clears readiness; recovery triggers a new check.
+
+Select Android Camera in FaceTime or Photo Booth and confirm moving video there.
+Automatic verification establishes camera availability and readback, while the
+usage indicator establishes another camera client; neither proves rendering
+inside a named app. The Mac preview alone verifies transport and decoding.
 
 Unplugging keeps the virtual camera registered on a placeholder slate;
 reconnect resumes automatically (backoff 0.5s → 8s). Diagnostics (FPS,

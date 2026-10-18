@@ -16,7 +16,7 @@ import java.io.FileOutputStream
 class UsbAccessoryTransport internal constructor(
     context: Context,
     private val hub: TransportHub,
-    private val backendOverride: UsbAccessoryBackend? = null,
+    private val backendOverride: UsbAccessoryBackend?,
 ) : Transport {
     constructor(context: Context, hub: TransportHub) : this(context, hub, null)
 

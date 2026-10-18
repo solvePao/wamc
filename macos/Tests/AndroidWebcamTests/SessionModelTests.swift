@@ -9,7 +9,7 @@ final class SessionModelTests: XCTestCase {
     func testUntrustedSourceRequiresConfirmationBeforeSwitchingActiveSession() throws {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = SessionModel(connection: connection)
+        let model = SessionModel(preferences: isolatedDefaults(), connection: connection)
         let phone = DiscoveredDevice(id: "phone-id", instanceName: "Phone", model: "Phone",
                                      brand: "", sdk: nil, port: 27183, version: 2)
         let wifi = ConnectionTarget.wifi(phone)
@@ -49,7 +49,7 @@ final class SessionModelTests: XCTestCase {
 
     func testDiscoveryRespectsManualSourceAndAutomaticStartPreference() {
         let connection = ConnectionController(receiver: FakeStreamTransport())
-        let model = SessionModel(connection: connection)
+        let model = SessionModel(preferences: isolatedDefaults(), connection: connection)
         model.startsAutomatically = false
         let cable = AndroidDevice(id: "usb-1", model: "Android", state: "device")
         let phone = DiscoveredDevice(id: "wifi-1", instanceName: "Phone", model: "Phone",
@@ -70,7 +70,7 @@ final class SessionModelTests: XCTestCase {
     func testSessionSnapshotDescribesConnectedStreamStates() async throws {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = SessionModel(connection: connection)
+        let model = SessionModel(preferences: isolatedDefaults(), connection: connection)
         let target = ConnectionTarget.address("127.0.0.1", 27183)
         let connected = expectation(description: "connection reaches connected state")
         connection.onStateChange = { state, _ in
@@ -98,31 +98,32 @@ final class SessionModelTests: XCTestCase {
 
 extension SessionModelTests {
     func testAutomaticPreferenceMigratesLegacyFlagsAndPersistsChanges() {
+        let defaults = isolatedDefaults()
         let keys = ["wamc.startStreamingAutomatically", "wamc.autoConnect", "wamc.autoStart"]
-        let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
+        let saved = keys.map { defaults.object(forKey: $0) }
         defer {
             for (key, value) in zip(keys, saved) {
-                if let value { UserDefaults.standard.set(value, forKey: key) }
-                else { UserDefaults.standard.removeObject(forKey: key) }
+                if let value { defaults.set(value, forKey: key) }
+                else { defaults.removeObject(forKey: key) }
             }
         }
-        UserDefaults.standard.removeObject(forKey: keys[0])
-        UserDefaults.standard.set(true, forKey: keys[1])
-        UserDefaults.standard.set(false, forKey: keys[2])
-        let model = SessionModel(connection: ConnectionController(receiver: FakeStreamTransport()))
+        defaults.removeObject(forKey: keys[0])
+        defaults.set(true, forKey: keys[1])
+        defaults.set(false, forKey: keys[2])
+        let model = SessionModel(preferences: defaults, connection: ConnectionController(receiver: FakeStreamTransport()))
         XCTAssertFalse(model.startsAutomatically)
         model.startsAutomatically = true
-        XCTAssertTrue(UserDefaults.standard.bool(forKey: keys[0]))
-        UserDefaults.standard.removeObject(forKey: keys[0])
-        UserDefaults.standard.removeObject(forKey: keys[1])
-        UserDefaults.standard.removeObject(forKey: keys[2])
-        XCTAssertTrue(SessionModel(connection: ConnectionController(receiver: FakeStreamTransport())).startsAutomatically)
+        XCTAssertTrue(defaults.bool(forKey: keys[0]))
+        defaults.removeObject(forKey: keys[0])
+        defaults.removeObject(forKey: keys[1])
+        defaults.removeObject(forKey: keys[2])
+        XCTAssertTrue(SessionModel(preferences: defaults, connection: ConnectionController(receiver: FakeStreamTransport())).startsAutomatically)
     }
 
     func testDiscoverySelectsTrustedWifiAndStartsOnlyWhenEndpointAvailable() {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = SessionModel(connection: connection)
+        let model = SessionModel(preferences: isolatedDefaults(), connection: connection)
         let phone = DiscoveredDevice(id: "automatic-phone", instanceName: "Phone", model: "Pixel",
                                      brand: "Google", sdk: 35, port: 27183, version: 2)
         model.startsAutomatically = true
@@ -140,7 +141,7 @@ extension SessionModelTests {
 
     func testMissingWifiEndpointFailsSynchronouslyAndTrustCanBeCancelled() {
         let connection = ConnectionController(receiver: FakeStreamTransport())
-        let model = SessionModel(connection: connection)
+        let model = SessionModel(preferences: isolatedDefaults(), connection: connection)
         let phone = DiscoveredDevice(id: "no-endpoint", instanceName: "Phone", model: "Phone",
                                      brand: "", sdk: nil, port: 27183, version: 2)
         var trusted = false
@@ -165,7 +166,7 @@ extension SessionModelTests {
     func testStartOnExistingConnectionReusesTransportAndStartsCamera() async throws {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = SessionModel(connection: connection)
+        let model = SessionModel(preferences: isolatedDefaults(), connection: connection)
         let target = ConnectionTarget.address("127.0.0.1", 27183)
         let connected = expectation(description: "connected")
         connection.onStateChange = { state, _ in if state.isConnected { connected.fulfill() } }
@@ -190,7 +191,7 @@ extension SessionModelTests {
     func testStopCancelsDeferredSourceSwitchAndIgnoresStartDuringTeardown() async throws {
         let transport = FakeStreamTransport()
         let connection = ConnectionController(receiver: transport)
-        let model = SessionModel(connection: connection)
+        let model = SessionModel(preferences: isolatedDefaults(), connection: connection)
         let original = ConnectionTarget.address("127.0.0.1", 27183)
         model.select(original)
         model.start()

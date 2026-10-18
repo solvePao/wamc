@@ -24,20 +24,53 @@ struct StableMenuContent: View, Equatable {
     }
 
     var body: some View {
+        let commands = MenuCommands(model: model, windows: openWindow)
         Text(shortTitle(snapshot.sessionAction.status))
         Text(shortTitle(snapshot.sessionAction.sourceLabel))
         Text(shortTitle(snapshot.cameraStatus))
+        Text(shortTitle(snapshot.cameraUsage))
         // Live stats stay in the window. Updating menu text while it is open
         // can rebuild native menu items and swallow clicks.
         Divider()
-        Button("Open WAMC") { showWindow() }
+        Button("Open WAMC", action: commands.showWindow)
         Button(action: model.performSessionAction) {
             Label(snapshot.sessionAction.title, systemImage: snapshot.sessionAction.symbol)
         }
         .disabled(!snapshot.sessionAction.enabled)
 
-        Menu("Camera") {
-            Picker("Quality", selection: Binding(get: { snapshot.quality }, set: model.setQuality)) {
+        Menu("Camera") { cameraItems }
+
+        Menu("Source") { sourceItems }
+
+        Menu("Preferences") { preferenceItems }
+        Divider()
+        Button("Setup & Diagnostics", action: commands.showSetup)
+        Menu("Troubleshooting") {
+            Button("Check camera output", action: model.checkCameraOutput)
+            Button("Camera Extension Settings", action: model.extensionManager.openSystemSettings)
+            Button("Set USB File Transfer", action: model.configureDeviceDefaultUsb)
+        }
+        Divider()
+        if let updater { UpdateMenuItem(updater: updater) }
+        Button("Quit WAMC", action: commands.quit)
+            .keyboardShortcut("q")
+    }
+
+    var qualitySelection: Binding<QualityMode> {
+        Binding(get: { snapshot.quality }, set: model.setQuality)
+    }
+
+    var automaticStreaming: Binding<Bool> {
+        Binding(get: { snapshot.startStreamingAutomatically },
+                set: { model.startStreamingAutomatically = $0 })
+    }
+
+    var loginEnabled: Binding<Bool> {
+        Binding(get: { snapshot.launchAtLogin }, set: model.setLaunchAtLogin)
+    }
+
+    @ViewBuilder var cameraItems: some View {
+            Picker("Quality", selection: qualitySelection) {
                 ForEach(QualityMode.allCases) { mode in
                     Text(mode.label).tag(mode)
                 }
@@ -48,7 +81,8 @@ struct StableMenuContent: View, Equatable {
             Button("Rotate 90°", action: model.rotate).disabled(!snapshot.connected)
         }
 
-        Menu("Source") {
+    @ViewBuilder var sourceItems: some View {
+            let commands = MenuCommands(model: model, windows: openWindow)
             sourceButton(snapshot.usb)
             ForEach(snapshot.phones) { phone in
                 sourceButton(phone.source)
@@ -61,45 +95,22 @@ struct StableMenuContent: View, Equatable {
             }
             Divider()
             Button("Refresh devices", action: model.refreshDevices)
-            Button("More source options…") { showWindow() }
+            Button("More source options…", action: commands.showWindow)
         }
 
-        Menu("Preferences") {
-            Toggle("Start streaming automatically", isOn: Binding(
-                get: { snapshot.startStreamingAutomatically },
-                set: { model.startStreamingAutomatically = $0 }))
-            Toggle("Launch at login", isOn: Binding(
-                get: { snapshot.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
+    @ViewBuilder var preferenceItems: some View {
+            Toggle("Start streaming automatically", isOn: automaticStreaming)
+            Toggle("Launch at login", isOn: loginEnabled)
             if snapshot.loginRequiresApproval {
-                Button("Approve Launch at Login…") { model.launchAtLogin.openLoginItemsSettings() }
+                Button("Approve Launch at Login…", action: model.launchAtLogin.openLoginItemsSettings)
             }
         }
-        Divider()
-        Button("Setup & Diagnostics") {
-            model.setup.showSetup = true
-            showWindow()
-        }
-        Menu("Troubleshooting") {
-            Button("Camera Extension Settings") { model.extensionManager.openSystemSettings() }
-            Button("Set USB File Transfer", action: model.configureDeviceDefaultUsb)
-        }
-        Divider()
-        if let updater { UpdateMenuItem(updater: updater) }
-        Button("Quit WAMC") { NSApplication.shared.terminate(nil) }
-            .keyboardShortcut("q")
-    }
-
     private func sourceButton(_ source: MenuSnapshot.Source) -> some View {
-        Button { model.selectSource(source.target) } label: {
+        let selection = SourceSelection(model: model, target: source.target)
+        return Button(action: selection.select) {
             Label(source.active ? "\(source.title) · Active" : source.title,
                   systemImage: source.selected ? "checkmark" : "circle")
         }
-    }
-
-    private func showWindow() {
-        openWindow(id: "main")
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func shortTitle(_ title: String) -> String {
@@ -129,6 +140,7 @@ struct MenuSnapshot: Equatable {
     }
 
     let cameraStatus: String
+    let cameraUsage: String
     let sessionAction: SessionActionSnapshot
     let connected: Bool
     let feedState: FeedState
@@ -146,7 +158,8 @@ struct MenuSnapshot: Equatable {
 
     @MainActor
     init(model: AppModel) {
-        cameraStatus = model.virtualCameraActive ? "Virtual camera ready" : model.virtualCameraStatusText
+        cameraStatus = "Camera: \(model.cameraHealth.health.output.rawValue)"
+        cameraUsage = model.cameraHealth.health.usageText
         sessionAction = model.sessionAction
         connected = model.connected
         feedState = model.feedState
@@ -172,7 +185,7 @@ struct MenuSnapshot: Equatable {
     }
 }
 
-private struct UpdateMenuItem: View {
+struct UpdateMenuItem: View {
     @ObservedObject var updater: AppUpdateController
 
     var body: some View {

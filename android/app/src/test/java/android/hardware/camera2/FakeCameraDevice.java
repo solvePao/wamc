@@ -13,6 +13,9 @@ public final class FakeCameraDevice extends CameraDevice {
     private final boolean configureSuccessfully;
     private final RuntimeException createRequestFailure;
     private FakeCameraCaptureSession lastSession;
+    private CaptureRequest.Builder requestBuilder;
+    private CameraCaptureSession.StateCallback sessionCallback;
+    private boolean deferConfiguration;
 
     public FakeCameraDevice() { this(null, false, null); }
     public FakeCameraDevice(RuntimeException failure) { this(failure, false, null); }
@@ -30,6 +33,8 @@ public final class FakeCameraDevice extends CameraDevice {
     @Override public void createCaptureSession(List<Surface> outputs, CameraCaptureSession.StateCallback callback, Handler handler) {
         if (createSessionFailure != null) throw createSessionFailure;
         lastSession = new FakeCameraCaptureSession(this);
+        sessionCallback = callback;
+        if (deferConfiguration) return;
         if (configureSuccessfully) callback.onConfigured(lastSession);
         else callback.onConfigureFailed(lastSession);
     }
@@ -39,8 +44,11 @@ public final class FakeCameraDevice extends CameraDevice {
     @Override public void createConstrainedHighSpeedCaptureSession(List<Surface> outputs, CameraCaptureSession.StateCallback callback, Handler handler) { }
     @Override public CaptureRequest.Builder createCaptureRequest(int templateType) {
         if (createRequestFailure != null) throw createRequestFailure;
-        return null;
+        return requestBuilder;
     }
+    public void setDeferConfiguration(boolean defer) { deferConfiguration = defer; }
+    public CameraCaptureSession.StateCallback getSessionCallback() { return sessionCallback; }
+    public void setRequestBuilder(CaptureRequest.Builder builder) { requestBuilder = builder; }
     @Override public CaptureRequest.Builder createReprocessCaptureRequest(TotalCaptureResult result) { return null; }
     @Override public void close() { closed = true; }
     public boolean isClosed() { return closed; }

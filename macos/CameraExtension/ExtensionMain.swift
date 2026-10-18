@@ -15,9 +15,13 @@ enum ExtensionBootstrap {
 @main
 enum ExtensionMain {
     static func main() {
-        ExtensionBootstrap.start {
-            let providerSource = ProviderSource()
-            CMIOExtensionProvider.startService(provider: providerSource.provider)
+        let providerSource = ProviderSource()
+        // CoreMediaIO keeps a weak source reference. Retain the entire source
+        // graph until the service run loop exits so client callbacks stay valid.
+        withExtendedLifetime(providerSource) {
+            ExtensionBootstrap.start {
+                CMIOExtensionProvider.startService(provider: providerSource.provider)
+            }
         }
     }
 }

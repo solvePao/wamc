@@ -80,18 +80,60 @@ class WifiDiscoveryAdvertiserTest {
         assertEquals(1, registrar.registerCalls)
         callback.onCapabilitiesChanged(network, NetworkCapabilities())
         callback.onLost(network)
-        callback.onAvailable(network)
+        val wifi = org.robolectric.shadows.ShadowNetworkCapabilities.newInstance()
+        org.robolectric.Shadows.shadowOf(wifi).addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+        callback.onCapabilitiesChanged(network, wifi)
         assertEquals(2, registrar.registerCalls)
+        callback.onLost(network)
+        callback.onAvailable(network)
+        assertEquals(3, registrar.registerCalls)
 
         registrar.registrationFailure = null
         callback.onLost(network)
         callback.onAvailable(network)
-        assertEquals(3, registrar.registerCalls)
+        assertEquals(4, registrar.registerCalls)
         registrar.listener!!.onServiceRegistered(NsdServiceInfo())
         registrar.unregisterFailure = IllegalStateException("NSD unregister failed")
         callback.onLost(network)
         registrar.listener!!.onUnregistrationFailed(NsdServiceInfo(), 2)
         advertiser.stop()
+    }
+
+    @Test
+    @Config(sdk = [28], shadows = [RecordingNsdManager::class])
+    fun legacyWifiStateUsesAndroidNsdRegistrar() {
+        val context = RuntimeEnvironment.getApplication()
+        val connectivity = context.getSystemService(android.net.ConnectivityManager::class.java)
+        org.robolectric.Shadows.shadowOf(connectivity).setActiveNetworkInfo(
+            org.robolectric.shadows.ShadowNetworkInfo.newInstance(
+                android.net.NetworkInfo.DetailedState.CONNECTED,
+                android.net.ConnectivityManager.TYPE_WIFI, 0, true, true))
+        val advertiser = WifiDiscoveryAdvertiser(context,
+            { DiscoveryConfig("550e8400-e29b-41d4-a716-446655440000", "Android", "", 28) },
+            registrarOverride = null)
+        val nsd = org.robolectric.shadow.api.Shadow.extract<RecordingNsdManager>(
+            context.getSystemService(NsdManager::class.java))
+        advertiser.start()
+        assertEquals(1, nsd.registered)
+        advertiser.stop()
+        assertEquals(1, nsd.unregistered)
+    }
+
+    @org.robolectric.annotation.Implements(NsdManager::class)
+    class RecordingNsdManager : org.robolectric.shadows.ShadowNsdManager() {
+        var registered = 0
+        var unregistered = 0
+        @org.robolectric.annotation.Implementation
+        protected fun registerService(info: NsdServiceInfo, protocol: Int, listener: NsdManager.RegistrationListener) {
+            registered++
+            assertEquals(NsdManager.PROTOCOL_DNS_SD, protocol)
+            listener.onServiceRegistered(info)
+        }
+        @org.robolectric.annotation.Implementation
+        protected fun unregisterService(listener: NsdManager.RegistrationListener) {
+            unregistered++
+            listener.onServiceUnregistered(NsdServiceInfo())
+        }
     }
 
     private class FakeRegistrar : NsdServiceRegistrar {

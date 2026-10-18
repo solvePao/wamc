@@ -158,7 +158,8 @@ extension USBConnectionSetupTests {
     }
 
     func testCancellingActiveCommandStopsItWithinDeadline() async {
-        let runner = ADBCommandRunner()
+        let started = expectation(description: "subprocess has started")
+        let runner = ADBCommandRunner(onStart: { started.fulfill() })
         let finished = expectation(description: "cancelled subprocess stops")
         DispatchQueue.global().async {
             do {
@@ -169,7 +170,7 @@ extension USBConnectionSetupTests {
             }
             finished.fulfill()
         }
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        await fulfillment(of: [started], timeout: 1)
         runner.cancel()
         await fulfillment(of: [finished], timeout: 2)
     }

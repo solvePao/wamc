@@ -24,3 +24,5 @@ __pycache__/
 *.p8
 *.pem
 release-dist/
+.agents/
+.test-results/

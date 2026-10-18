@@ -42,7 +42,7 @@ struct ConnectionControls: View {
                     TextField("192.168.1.20 or host:port", text: $model.manualAddress)
                         .textFieldStyle(.roundedBorder)
                         .accessibilityLabel("Manual phone address")
-                        .onSubmit { model.useManualAddress() }
+                        .onSubmit(model.useManualAddress)
                     Button("Use address", action: model.useManualAddress)
                         .disabled(model.manualAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     Text("Use when your network blocks automatic discovery.")
@@ -72,7 +72,8 @@ struct ConnectionControls: View {
     private func sourceRow(for target: ConnectionTarget, title: String, subtitle: String, symbol: String) -> some View {
         let selected = model.isSourceSelected(target)
         let active = model.isSourceActive(target)
-        return Button { model.selectSource(target) } label: {
+        let selection = SourceSelection(model: model, target: target)
+        return Button(action: selection.select) {
             HStack(alignment: .center, spacing: 10) {
                 Image(systemName: symbol)
                     .foregroundStyle(.secondary)
@@ -103,17 +104,12 @@ struct AutomationPreferences: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Toggle("Start streaming automatically", isOn: Binding(
-                get: { model.startStreamingAutomatically },
-                set: { model.startStreamingAutomatically = $0 }))
+            Toggle("Start streaming automatically", isOn: $model.startStreamingAutomatically)
                 .help("Start streaming when an available phone can connect automatically")
             Toggle("Launch at login", isOn: Binding(
-                get: { model.launchAtLoginEnabled },
-                set: { model.setLaunchAtLogin($0) }))
+                get: { model.launchAtLoginEnabled }, set: model.setLaunchAtLogin))
             if model.launchAtLoginRequiresApproval {
-                Button("Approve in Login Items…") {
-                    model.launchAtLogin.openLoginItemsSettings()
-                }
+                Button("Approve in Login Items…", action: model.launchAtLogin.openLoginItemsSettings)
             }
         }
         .toggleStyle(.checkbox)

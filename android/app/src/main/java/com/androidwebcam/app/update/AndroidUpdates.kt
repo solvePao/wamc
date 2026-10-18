@@ -8,9 +8,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import com.androidwebcam.app.BuildConfig
-import java.io.File
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
 object AndroidUpdates {
     private var instance: UpdateCoordinator? = null
@@ -21,18 +19,8 @@ object AndroidUpdates {
         val app = context.applicationContext
         val repository = ReleaseRepository()
         val installer = AndroidUpdateInstaller(app)
-        val backend = object : UpdateBackend {
-            override fun latest() = repository.latest(BuildConfig.VERSION_CODE.toLong(), Build.VERSION.SDK_INT)
-            override fun download(release: AndroidRelease, cancelled: AtomicBoolean, progress: (Int) -> Unit): File {
-                val file = File.createTempFile("wamc-update-", ".apk", app.cacheDir)
-                try {
-                    repository.download(release, file, cancelled, progress)
-                    installer.validate(file, release)
-                    return file
-                } catch (error: Exception) { file.delete(); throw error }
-            }
-            override fun install(file: File, release: AndroidRelease) = installer.install(file, release)
-        }
+        val backend = ReleaseUpdateBackend(app.cacheDir, repository, installer,
+            BuildConfig.VERSION_CODE.toLong(), Build.VERSION.SDK_INT)
         val main = Handler(Looper.getMainLooper())
         return UpdateCoordinator(backend, Executors.newSingleThreadExecutor()) { callback -> main.post(callback) }
             .also { instance = it }

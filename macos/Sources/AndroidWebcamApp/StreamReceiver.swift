@@ -11,6 +11,37 @@ protocol StreamTransport: AnyObject {
     func sendControl(_ fields: [(String, String)], attempt: UUID, completion: (() -> Void)?)
 }
 
+protocol StreamConnection: AnyObject {
+    var stateUpdateHandler: ((NWConnection.State) -> Void)? { get set }
+    func start(queue: DispatchQueue)
+    func cancel()
+    func send(content: Data, completion: @escaping (NWError?) -> Void)
+    func receive(completion: @escaping (Data?, Bool, NWError?) -> Void)
+}
+
+final class NetworkStreamConnection: StreamConnection {
+    private let connection: NWConnection
+    var stateUpdateHandler: ((NWConnection.State) -> Void)? {
+        get { connection.stateUpdateHandler }
+        set { connection.stateUpdateHandler = newValue }
+    }
+    init(endpoint: NWEndpoint) {
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        connection = NWConnection(to: endpoint, using: NWParameters(tls: nil, tcp: tcp))
+    }
+    func start(queue: DispatchQueue) { connection.start(queue: queue) }
+    func cancel() { connection.cancel() }
+    func send(content: Data, completion: @escaping (NWError?) -> Void) {
+        connection.send(content: content, completion: .contentProcessed(completion))
+    }
+    func receive(completion: @escaping (Data?, Bool, NWError?) -> Void) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) {
+            data, _, complete, error in completion(data, complete, error)
+        }
+    }
+}
+
 /// One serial parser and control channel for USB and Wi-Fi. Every callback
 /// carries the attempt that produced it; cancellation cannot revive an old dial.
 final class StreamReceiver: StreamTransport {
@@ -24,12 +55,24 @@ final class StreamReceiver: StreamTransport {
     }
 
     var onEvent: ((UUID, Event) -> Void)?
-    private let queue = DispatchQueue(label: "awc.receiver")
-    private var connection: NWConnection?
+    private let queue: DispatchQueue
+    private let makeConnection: (NWEndpoint) -> StreamConnection
+    private let scheduleReconnect: (TimeInterval, @escaping () -> Void) -> Void
+    private var connection: StreamConnection?
     private var attempt: UUID?
     private var endpoint: NWEndpoint?
     private var parser = FrameParser()
     private var reconnect = ReconnectPolicy()
+
+    init(queue: DispatchQueue = DispatchQueue(label: "awc.receiver"),
+         makeConnection: @escaping (NWEndpoint) -> StreamConnection = { NetworkStreamConnection(endpoint: $0) },
+         scheduleReconnect: ((TimeInterval, @escaping () -> Void) -> Void)? = nil) {
+        self.queue = queue
+        self.makeConnection = makeConnection
+        self.scheduleReconnect = scheduleReconnect ?? { delay, action in
+            queue.asyncAfter(deadline: .now() + delay, execute: action)
+        }
+    }
 
     func start(endpoint: NWEndpoint, attempt: UUID) {
         queue.async { [self] in
@@ -54,7 +97,7 @@ final class StreamReceiver: StreamTransport {
                 completion?()
                 return
             }
-            connection.send(content: frame, completion: .contentProcessed { error in
+            connection.send(content: frame, completion: { error in
                 if let error {
                     AppLogger.connection.error("Sending stream control frame failed: \(error.localizedDescription, privacy: .private)")
                 }
@@ -83,9 +126,7 @@ final class StreamReceiver: StreamTransport {
     private func connect(attempt: UUID) {
         guard self.attempt == attempt, let endpoint else { return }
         parser = FrameParser()
-        let tcp = NWProtocolTCP.Options()
-        tcp.noDelay = true
-        let conn = NWConnection(to: endpoint, using: NWParameters(tls: nil, tcp: tcp))
+        let conn = makeConnection(endpoint)
         connection = conn
         conn.stateUpdateHandler = { [weak self] state in
             guard let self, self.attempt == attempt, self.connection === conn else { return }
@@ -105,21 +146,21 @@ final class StreamReceiver: StreamTransport {
         conn.start(queue: queue)
     }
 
-    private func reconnect(attempt: UUID, connection conn: NWConnection) {
+    private func reconnect(attempt: UUID, connection conn: StreamConnection) {
         guard self.attempt == attempt, self.connection === conn else { return }
         self.connection = nil
         conn.stateUpdateHandler = nil
         conn.cancel()
         self.onEvent?(attempt, .transportLost)
         let delay = self.reconnect.nextDelay()
-        self.queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+        scheduleReconnect(delay) { [weak self] in
             self?.connect(attempt: attempt)
         }
     }
 
-    private func receiveLoop(_ conn: NWConnection, attempt: UUID) {
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) {
-            [weak self] data, _, isComplete, error in
+    private func receiveLoop(_ conn: StreamConnection, attempt: UUID) {
+        conn.receive {
+            [weak self] data, isComplete, error in
             guard let self, self.attempt == attempt, self.connection === conn else { return }
             if let data, !data.isEmpty {
                 for frame in self.parser.feed(data) {

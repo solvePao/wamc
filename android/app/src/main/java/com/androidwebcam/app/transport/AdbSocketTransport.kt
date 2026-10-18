@@ -5,17 +5,32 @@ import java.net.ServerSocket
 import kotlin.concurrent.thread
 
 /** Phase 1/2 transport: listens on TCP 27183, reached via `adb forward`. */
-class AdbSocketTransport(private val hub: TransportHub, private val port: Int = 27183) : Transport {
+class AdbSocketTransport(
+    private val hub: TransportHub,
+    private val port: Int = 27183,
+    private val serverFactory: (Int) -> ServerSocket = { ServerSocket(it) },
+) : Transport {
     override val name = "adb-tcp"
     @Volatile private var running = false
     private var server: ServerSocket? = null
+    private var startGeneration = 0
 
+    @Synchronized
     override fun start(onControl: (Map<String, String>) -> Unit) {
         if (running) return
         running = true
+        val generation = ++startGeneration
         thread(name = "awc-adb-accept", isDaemon = true) {
             runCatching {
-                ServerSocket(port).also { server = it }.use { socket ->
+                serverFactory(port).also { listener ->
+                    synchronized(this@AdbSocketTransport) {
+                        if (!running || generation != startGeneration) {
+                            listener.close()
+                            return@thread
+                        }
+                        server = listener
+                    }
+                }.use { socket ->
                     AppLog.info("AdbSocketTransport", "listening on port $port")
                     while (running) {
                         val client = socket.accept()
@@ -40,6 +55,7 @@ class AdbSocketTransport(private val hub: TransportHub, private val port: Int = 
         }
     }
 
+    @Synchronized
     override fun close() {
         running = false
         runCatching { server?.close() }

@@ -95,6 +95,11 @@ class CodecConfigTest {
 
     private fun nal(vararg bytes: Byte): ByteArray = byteArrayOf(0, 0, 0, 1, *bytes)
 
+    @Test fun unrecognizedZeroPrefixRemainsPayload() {
+        val payload = byteArrayOf(0, 0, 0, 0, 0x67)
+        assertArrayEquals(payload, CodecConfig.splitAnnexB(payload).single())
+    }
+
     @Test fun splitsMixedStartCodes() {
         val blob = nal(0x67, 0x01) + byteArrayOf(0, 0, 1, 0x68, 0x02)
         val nals = CodecConfig.splitAnnexB(blob)

@@ -14,6 +14,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Semaphore
 
 class TransportHubTest {
 
@@ -22,6 +23,8 @@ class TransportHubTest {
         val enteredWrite = CountDownLatch(1)
         val release = CountDownLatch(1)
         val bytes = ByteArrayOutputStream()
+        val flushed = Semaphore(0)
+        override fun flush() { flushed.release() }
         override fun write(b: Int) {
             enteredWrite.countDown()
             release.await(15, TimeUnit.SECONDS)
@@ -50,27 +53,27 @@ class TransportHubTest {
         val input = GatedInputStream()
         hub.attach(input, out, onControl = {}, lowLatency = false)
 
-        val config = WireProtocol.encodeConfig(
-            byteArrayOf(0x67), byteArrayOf(0x68), 1280, 720, 30, 0)
-        hub.sendConfig(config)
-        assertEquals(true, out.enteredWrite.await(5, TimeUnit.SECONDS))
-
-        hub.sendVideo(ByteArray(8) { 0x41 }, false, 1000)
-        hub.sendVideo(ByteArray(8) { 0x42 }, true, 2000)
-        Thread.sleep(200)
-        hub.flushVideo()
-        out.release.countDown()
-        input.release.countDown()
-
-        val expected = WireProtocol.HEADER_SIZE + config.size
-        val deadline = System.currentTimeMillis() + 5000
-        while (out.bytes.size() < expected && System.currentTimeMillis() < deadline) {
-            Thread.sleep(10)
+        try {
+            val config = WireProtocol.encodeConfig(
+                byteArrayOf(0x67), byteArrayOf(0x68), 1280, 720, 30, 0)
+            hub.sendConfig(config)
+            assertTrue(out.enteredWrite.await(5, TimeUnit.SECONDS))
+            hub.sendVideo(ByteArray(8) { 0x41 }, false, 1000)
+            hub.sendVideo(ByteArray(8) { 0x42 }, true, 2000)
+            hub.flushVideo()
+            // A marker after the flush proves all earlier queued work completed.
+            hub.sendHello(byteArrayOf(9))
+            out.release.countDown()
+            assertTrue(out.flushed.tryAcquire(2, 5, TimeUnit.SECONDS))
+            val frames = ByteArrayInputStream(out.bytes.toByteArray())
+            assertEquals(WireProtocol.TYPE_CONFIG, WireProtocol.readFrame(frames).type)
+            assertEquals(WireProtocol.TYPE_HELLO, WireProtocol.readFrame(frames).type)
+            assertEquals(0, frames.available())
+        } finally {
+            out.release.countDown()
+            input.release.countDown()
+            hub.closeAll()
         }
-        assertEquals(expected, out.bytes.size())
-        Thread.sleep(300)
-        assertEquals(expected, out.bytes.size())
-        assertEquals(WireProtocol.TYPE_CONFIG, out.bytes.toByteArray()[4].toInt())
     }
 
     @Test fun wifiQueueKeepsLatestVideoAndTracksDrops() {
@@ -115,11 +118,76 @@ class TransportHubTest {
         val hub = TransportHub()
         val input = GatedInputStream()
         hub.attach(input, FailingOutputStream(), onControl = {})
-        hub.sendHello(byteArrayOf(1))
+        try {
+            hub.sendHello(byteArrayOf(1))
+            assertTrue(awaitCondition { hub.peerCount() == 0 })
+            assertFalse(hub.stats().written > 0L)
+        } finally {
+            input.release.countDown()
+            hub.closeAll()
+        }
+    }
 
-        assertTrue(awaitCondition { hub.peerCount() == 0 })
-        input.release.countDown()
-        assertFalse(hub.stats().written > 0L)
+    @Test fun controlFramesReachListener() {
+        val controlBytes = ByteArrayOutputStream().apply {
+            WireProtocol.writeFrame(this, WireProtocol.Frame(WireProtocol.TYPE_CONTROL, 0, 0,
+                WireProtocol.encodeControl(mapOf("cmd" to "ping"))))
+        }.toByteArray()
+        val received = CountDownLatch(1)
+        val hub = TransportHub()
+        var control: Map<String, String>? = null
+        try {
+            hub.attach(ByteArrayInputStream(controlBytes), ByteArrayOutputStream(), {
+                control = it
+                received.countDown()
+            })
+            assertTrue(received.await(5, TimeUnit.SECONDS))
+            assertEquals(mapOf("cmd" to "ping"), control)
+        } finally { hub.closeAll() }
+    }
+
+    @Test fun fullUsbQueuePreservesConfigAndReplacesControl() {
+        val hub = TransportHub()
+        val out = GatedOutputStream()
+        val input = GatedInputStream()
+        hub.attach(input, out, {})
+        try {
+            hub.sendHello(byteArrayOf(1))
+            assertTrue(out.enteredWrite.await(5, TimeUnit.SECONDS))
+            repeat(TransportHub.usbQueueCapacity) { hub.sendConfig(byteArrayOf(it.toByte())) }
+            hub.sendVideo(byteArrayOf(9), false, 0)
+            assertEquals(1L, hub.stats().dropped)
+            // A non-video frame can evict the oldest queued frame when full.
+            hub.sendConfigV2(byteArrayOf(8))
+            assertEquals(2L, hub.stats().dropped)
+            out.release.countDown()
+            assertTrue(out.flushed.tryAcquire(4, 5, TimeUnit.SECONDS))
+            val frames = ByteArrayInputStream(out.bytes.toByteArray())
+            assertEquals(WireProtocol.TYPE_HELLO, WireProtocol.readFrame(frames).type)
+            assertEquals(WireProtocol.TYPE_CONFIG, WireProtocol.readFrame(frames).type)
+            assertEquals(WireProtocol.TYPE_CONFIG, WireProtocol.readFrame(frames).type)
+            assertEquals(WireProtocol.TYPE_CONFIG2, WireProtocol.readFrame(frames).type)
+        } finally {
+            out.release.countDown()
+            input.release.countDown()
+            hub.closeAll()
+        }
+    }
+
+    @Test fun sustainedWriterReportsAllCompletedFrames() {
+        val hub = TransportHub()
+        val input = GatedInputStream()
+        val output = GatedOutputStream().apply { release.countDown() }
+        hub.attach(input, output, {})
+        try {
+            repeat(150) {
+                hub.sendHello(byteArrayOf(1))
+                assertTrue(output.flushed.tryAcquire(5, TimeUnit.SECONDS))
+            }
+            assertTrue(awaitCondition { hub.stats().written == 150L })
+            assertEquals(150L, hub.stats().offered)
+            assertEquals(0L, hub.stats().dropped)
+        } finally { input.release.countDown(); hub.closeAll() }
     }
 
     private fun awaitCondition(timeoutMs: Long = 5_000, condition: () -> Boolean): Boolean {

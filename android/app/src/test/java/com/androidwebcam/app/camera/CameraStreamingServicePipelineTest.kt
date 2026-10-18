@@ -28,8 +28,10 @@ class CameraStreamingServicePipelineTest {
         val camera = FakeStreamingCamera()
         val encoder = FakeStreamingEncoder()
         service.cameraFactory = StreamingCameraFactory { camera }
-        service.encoderFactory = StreamingEncoderFactory { _, _, _, sets, frame ->
+        service.encoderFactory = StreamingEncoderFactory { _, _, config, sets, frame ->
             encoder.onStarted = {
+                config(byteArrayOf(0x67), byteArrayOf(0x68))
+                sets(listOf(byteArrayOf(0x67, 0x64), byteArrayOf(0x68, 0x01)))
                 sets(listOf(byteArrayOf(0x67, 0x64), byteArrayOf(0x68, 0x01)))
                 frame(byteArrayOf(0x65, 0x01), true, 100L)
             }
@@ -44,6 +46,10 @@ class CameraStreamingServicePipelineTest {
         assertEquals(1, camera.openCount)
         assertEquals("Streaming — waiting for Mac on USB", service.currentStatus())
         val generation = service.streamGeneration
+        val displayEvents = CameraStreamingService::class.java.getDeclaredField("displayListener")
+            .apply { isAccessible = true }.get(service) as android.hardware.display.DisplayManager.DisplayListener
+        displayEvents.onDisplayAdded(1)
+        displayEvents.onDisplayRemoved(1)
         service.notifyConfigurationChanged()
         shadowOf(Looper.getMainLooper()).idleFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)
         assertEquals(generation, service.streamGeneration)
@@ -58,6 +64,16 @@ class CameraStreamingServicePipelineTest {
         assertTrue(service.hasCameraError) // fake camera reports the asynchronous open failure
         assertTrue(service.currentStatus().startsWith("Camera open failed:"))
 
+        service.handleControl(mapOf("cmd" to "hello", "codecs" to "avc"))
+        for (rotation in listOf(Surface.ROTATION_90, Surface.ROTATION_180, Surface.ROTATION_270)) {
+            val display = service.getSystemService(android.view.WindowManager::class.java).defaultDisplay
+            shadowOf(display).setRotation(rotation)
+            service.notifyConfigurationChanged()
+            shadowOf(Looper.getMainLooper()).idleFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
+        service.rotate()
+        shadowOf(Looper.getMainLooper()).idleFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+        assertEquals(generation, service.streamGeneration)
         service.setEnhancementEnabled(false)
         assertEquals(2, service.streamGeneration)
         service.setQuality(StreamQuality.BALANCED)
@@ -114,6 +130,78 @@ class CameraStreamingServicePipelineTest {
         assertEquals("Camera cannot disable automatic rotation", service.currentStatus())
 
         serviceController.destroy()
+    }
+
+    @Test
+    @Config(sdk = [28], shadows = [VideoEncoderRobolectricTest.SurfaceCodecShadow::class,
+        com.androidwebcam.app.WifiDiscoveryAdvertiserTest.RecordingNsdManager::class])
+    fun defaultEncoderAndLegacyForegroundSupportWifiDiscovery() {
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
+        val connectivity = app.getSystemService(android.net.ConnectivityManager::class.java)
+        shadowOf(connectivity).setActiveNetworkInfo(org.robolectric.shadows.ShadowNetworkInfo.newInstance(
+            android.net.NetworkInfo.DetailedState.CONNECTED, android.net.ConnectivityManager.TYPE_WIFI, 0, true, true))
+        org.robolectric.shadows.ShadowMediaCodec.addEncoder("video/avc",
+            org.robolectric.shadows.ShadowMediaCodec.CodecConfig(4, 4,
+                object : org.robolectric.shadows.ShadowMediaCodec.CodecConfig.Codec {
+                    override fun process(input: java.nio.ByteBuffer, output: java.nio.ByteBuffer) = Unit
+                    override fun onConfigured(format: android.media.MediaFormat, surface: Surface?,
+                        crypto: android.media.MediaCrypto?, flags: Int) = Unit
+                }))
+        val controller = Robolectric.buildService(CameraStreamingService::class.java).create()
+        val service = controller.get()
+        try {
+            assertEquals(emptyList<CameraInfo>(), service.getAvailableCameras())
+            service.cameraFactory = StreamingCameraFactory { FakeStreamingCamera() }
+            service.setActivityVisible(true)
+            assertTrue(service.startStreaming(640, 480))
+            assertTrue(service.streaming)
+            val nsd = org.robolectric.shadow.api.Shadow.extract<com.androidwebcam.app.WifiDiscoveryAdvertiserTest.RecordingNsdManager>(
+                app.getSystemService(android.net.nsd.NsdManager::class.java))
+            assertEquals(1, nsd.registered)
+            service.stopStreaming()
+        } finally {
+            controller.destroy()
+            org.robolectric.shadows.ShadowMediaCodec.clearCodecs()
+        }
+    }
+
+    @Test fun unavailableCameraManagerReturnsEmptyInventory() {
+        val controller = Robolectric.buildService(CameraStreamingService::class.java).create()
+        try {
+            val service = controller.get()
+            org.robolectric.shadow.api.Shadow.extract<org.robolectric.shadows.ShadowContextImpl>(service.baseContext)
+                .setSystemService(android.content.Context.CAMERA_SERVICE, null)
+            assertEquals(emptyList<CameraInfo>(), service.getAvailableCameras())
+        } finally { controller.destroy() }
+    }
+
+    @Test
+    @Config(shadows = [DeniedForegroundShadow::class])
+    fun foregroundDenialKeepsIdleListenerAndRejectsStreaming() {
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
+        val controller = Robolectric.buildService(CameraStreamingService::class.java).create()
+        val service = controller.get()
+        try {
+            assertEquals(android.app.Service.START_STICKY, service.onStartCommand(null, 0, 1))
+            service.setActivityVisible(true)
+            assertFalse(service.startStreaming(640, 480))
+            assertEquals("Camera service start denied: simulated foreground denial", service.currentStatus())
+            assertFalse(service.streaming)
+        } finally { controller.destroy() }
+    }
+
+    @org.robolectric.annotation.Implements(android.app.Service::class)
+    class DeniedForegroundShadow : org.robolectric.shadows.ShadowService() {
+        @org.robolectric.annotation.Implementation
+        override fun startForeground(id: Int, notification: android.app.Notification) {
+            throw SecurityException("simulated foreground denial")
+        }
+        @org.robolectric.annotation.Implementation
+        override fun startForeground(id: Int, notification: android.app.Notification, type: Int) {
+            throw SecurityException("simulated foreground denial")
+        }
     }
 
     private class FakeStreamingCamera(

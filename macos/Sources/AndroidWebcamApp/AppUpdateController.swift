@@ -82,14 +82,24 @@ final class AppUpdateController: ObservableObject {
 }
 
 @MainActor
-private final class SparkleUpdateDriver: NSObject, AppUpdateDriving, SPUUpdaterDelegate {
+final class SparkleUpdateDriver: NSObject, AppUpdateDriving, SPUUpdaterDelegate {
     var postponeInstallation: ((@escaping () -> Void) -> Bool)?
-    private lazy var controller = SPUStandardUpdaterController(
-        startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil)
+    private let bundle: Bundle
+    private let controllerFactory: (SPUUpdaterDelegate) -> SPUStandardUpdaterController
+    private lazy var controller = controllerFactory(self)
+
+    init(bundle: Bundle = .main,
+         controllerFactory: @escaping (SPUUpdaterDelegate) -> SPUStandardUpdaterController = {
+             SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: $0, userDriverDelegate: nil)
+         }) {
+        self.bundle = bundle
+        self.controllerFactory = controllerFactory
+        super.init()
+    }
 
     func start() throws {
-        guard Bundle.main.bundleURL.pathExtension == "app",
-              let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
+        guard bundle.bundleURL.pathExtension == "app",
+              let key = bundle.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
               !key.isEmpty else {
             throw NSError(domain: "WAMC.Update", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Updates require an installed WAMC release with a configured signing key."

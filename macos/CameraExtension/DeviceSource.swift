@@ -1,3 +1,6 @@
+#if WAMC_COVERAGE_TESTING
+import AndroidWebcamCore
+#endif
 import Foundation
 import CoreMediaIO
 
@@ -31,13 +34,20 @@ final class DeviceSource: NSObject, CMIOExtensionDeviceSource {
         sinkStream.stream = sink
     }
 
-    var availableProperties: Set<CMIOExtensionProperty> { [.deviceModel] }
+    private let healthProperty = CMIOExtensionProperty(rawValue: CameraHealthSnapshot.propertyName)
+    var availableProperties: Set<CMIOExtensionProperty> { [.deviceModel, healthProperty] }
 
     func deviceProperties(forProperties properties: Set<CMIOExtensionProperty>) throws
         -> CMIOExtensionDeviceProperties {
         let props = CMIOExtensionDeviceProperties(dictionary: [:])
         if properties.contains(.deviceModel) {
             props.model = "Android Camera"
+        }
+        if properties.contains(healthProperty) {
+            let data = try JSONEncoder().encode(SharedFrame.shared.healthSnapshot())
+            let value = String(decoding: data, as: UTF8.self) as NSString
+            props.setPropertyState(CMIOExtensionPropertyState<AnyObject>(value: value),
+                                   forProperty: healthProperty)
         }
         return props
     }

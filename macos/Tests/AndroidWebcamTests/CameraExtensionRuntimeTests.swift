@@ -1,5 +1,6 @@
 import CoreVideo
 import CoreMedia
+import CoreMediaIO
 import XCTest
 @testable import CameraExtensionRuntime
 
@@ -59,39 +60,54 @@ final class CameraExtensionRuntimeTests: XCTestCase {
         try sink.stopStream()
     }
 
-    func testSourceStreamPublishesFramesAndStopsAfterLastClient() async throws {
+    func testSourceStreamPublishesFramesAndStopsAfterLastClient() throws {
         let sample = try makeSample(from: makePixelBuffer(width: 4, height: 4))
         let provider = FakeCameraFrameProvider(sample: sample)
-        let sent = expectation(description: "source publishes a frame")
-        let publisher = FakeExtensionSamplePublisher { sent.fulfill() }
+        let publisher = FakeExtensionSamplePublisher {}
+        let timer = ManualCameraStreamTimer()
         let source = SourceStreamSource(localizedName: "test", frameProvider: provider,
-                                        publisher: publisher)
+                                        publisher: publisher, timer: timer)
 
         try source.startStream()
         try source.startStream()
-        await fulfillment(of: [sent], timeout: 1)
+        timer.tick()
+        XCTAssertEqual(timer.startCount, 1)
+        XCTAssertEqual(publisher.sendCount, 1)
         try source.stopStream()
-        XCTAssertGreaterThan(provider.sampleCount, 0)
-        XCTAssertGreaterThan(publisher.sendCount, 0)
+        timer.tick()
+        XCTAssertEqual(publisher.sendCount, 2, "One client still consumes frames")
 
         try source.stopStream()
-        let sendsAtStop = publisher.sendCount
-        try await Task.sleep(nanoseconds: 80_000_000)
-        XCTAssertEqual(publisher.sendCount, sendsAtStop)
+        timer.tick()
+        XCTAssertEqual(timer.stopCount, 1)
+        XCTAssertEqual(publisher.sendCount, 2, "The final client cancels frame pacing")
     }
 
-    func testSourceStreamSkipsPublishingWhenFrameProviderHasNoSample() async throws {
+    func testSourceStreamSkipsPublishingWhenFrameProviderHasNoSample() throws {
         let provider = EmptyCameraFrameProvider()
         let publisher = FakeExtensionSamplePublisher {}
+        let timer = ManualCameraStreamTimer()
         let source = SourceStreamSource(localizedName: "test", frameProvider: provider,
-                                        publisher: publisher)
+                                        publisher: publisher, timer: timer)
 
         try source.startStream()
-        try await Task.sleep(nanoseconds: 50_000_000)
+        timer.tick()
         try source.stopStream()
 
-        XCTAssertGreaterThan(provider.sampleCount, 0)
+        XCTAssertEqual(provider.sampleCount, 1)
         XCTAssertEqual(publisher.sendCount, 0)
+    }
+
+    func testProductionTimerPublishesAFrameWithoutWaitingForAnArbitraryDelay() async throws {
+        let sample = try makeSample(from: makePixelBuffer(width: 4, height: 4))
+        let sent = expectation(description: "production timer publishes a frame")
+        sent.assertForOverFulfill = false
+        let source = SourceStreamSource(localizedName: "test",
+            frameProvider: FakeCameraFrameProvider(sample: sample),
+            publisher: FakeExtensionSamplePublisher { sent.fulfill() })
+        try source.startStream()
+        defer { try? source.stopStream() }
+        await fulfillment(of: [sent], timeout: 1)
     }
 
     func testSinkStreamAcceptsSamplesOnlyWhileStreaming() throws {
@@ -133,6 +149,8 @@ final class CameraExtensionRuntimeTests: XCTestCase {
 
     func testProviderReturnsOnlyRequestedProperties() throws {
         let provider = ProviderSource()
+        try provider.setProviderProperties(CMIOExtensionProviderProperties(dictionary: [:]))
+        XCTAssertEqual(provider.availableProperties, [.providerManufacturer, .providerName])
         let requested = try provider.providerProperties(forProperties: [.providerName])
         let complete = try provider.providerProperties(forProperties: [.providerName, .providerManufacturer])
 
@@ -184,32 +202,71 @@ final class CameraExtensionRuntimeTests: XCTestCase {
 
 private final class FakeCameraFrameProvider: CameraFrameProviding {
     private let sampleValue: CMSampleBuffer
-    private(set) var sampleCount = 0
+    private let sampleCountLock = NSLock()
+    private var sampleCountValue = 0
+    var sampleCount: Int {
+        sampleCountLock.lock()
+        defer { sampleCountLock.unlock() }
+        return sampleCountValue
+    }
 
     init(sample: CMSampleBuffer) { sampleValue = sample }
 
     func sample(format: CMFormatDescription?, hostTime: CMTime) -> CMSampleBuffer? {
-        sampleCount += 1
+        sampleCountLock.lock()
+        sampleCountValue += 1
+        sampleCountLock.unlock()
         return sampleValue
     }
 }
 
 private final class EmptyCameraFrameProvider: CameraFrameProviding {
-    private(set) var sampleCount = 0
+    private let sampleCountLock = NSLock()
+    private var sampleCountValue = 0
+    var sampleCount: Int {
+        sampleCountLock.lock()
+        defer { sampleCountLock.unlock() }
+        return sampleCountValue
+    }
     func sample(format: CMFormatDescription?, hostTime: CMTime) -> CMSampleBuffer? {
-        sampleCount += 1
+        sampleCountLock.lock()
+        sampleCountValue += 1
+        sampleCountLock.unlock()
         return nil
     }
 }
 
 private final class FakeExtensionSamplePublisher: ExtensionSamplePublishing {
     private let onSend: () -> Void
-    private(set) var sendCount = 0
+    private let sendCountLock = NSLock()
+    private var sendCountValue = 0
+    var sendCount: Int {
+        sendCountLock.lock()
+        defer { sendCountLock.unlock() }
+        return sendCountValue
+    }
 
     init(onSend: @escaping () -> Void) { self.onSend = onSend }
 
     func send(_ sample: CMSampleBuffer, hostTimeNanoseconds: UInt64) {
-        sendCount += 1
+        sendCountLock.lock()
+        sendCountValue += 1
+        sendCountLock.unlock()
         onSend()
     }
+}
+
+private final class ManualCameraStreamTimer: CameraStreamTiming {
+    private var callback: (() -> Void)?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    func start(_ tick: @escaping () -> Void) {
+        startCount += 1
+        callback = tick
+    }
+    func stop() {
+        stopCount += 1
+        callback = nil
+    }
+    func tick() { callback?() }
 }

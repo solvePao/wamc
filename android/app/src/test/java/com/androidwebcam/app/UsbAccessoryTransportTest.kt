@@ -22,12 +22,31 @@ class UsbAccessoryTransportTest {
     @Test fun absentAccessoryIsSafeAndTransportCanCloseRepeatedly() {
         val hub = TransportHub()
         val transport = UsbAccessoryTransport(RuntimeEnvironment.getApplication(), hub)
+        assertEquals("aoa-usb", transport.name)
         assertNull(transport.attachedAccessory())
         assertEquals("com.androidwebcam.app.USB_PERMISSION", transport.permissionIntentAction())
         transport.start {}
         transport.close()
         transport.close()
         hub.closeAll()
+    }
+
+    @Test
+    @Config(sdk = [28])
+    fun androidBackendUsesAttachedAccessoryAndPermission() {
+        val context = RuntimeEnvironment.getApplication()
+        val manager = context.getSystemService(android.hardware.usb.UsbManager::class.java)
+        val accessory = accessory()
+        org.robolectric.Shadows.shadowOf(manager).apply {
+            setAttachedUsbAccessory(accessory)
+            grantPermission(accessory)
+        }
+        val hub = TransportHub()
+        val transport = UsbAccessoryTransport(context, hub)
+        try {
+            org.junit.Assert.assertSame(accessory, transport.attachedAccessory())
+            transport.start {}
+        } finally { transport.close(); hub.closeAll() }
     }
 
     @Test fun missingPermissionDoesNotOpenAccessory() {

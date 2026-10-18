@@ -55,8 +55,7 @@ final class LaunchAtLoginTests: XCTestCase {
     }
 
     private func makeDefaults() -> UserDefaults {
-        let defaults = UserDefaults(suiteName: "LaunchAtLoginTests-\(UUID().uuidString)")!
-        return defaults
+        isolatedDefaults()
     }
 }
 

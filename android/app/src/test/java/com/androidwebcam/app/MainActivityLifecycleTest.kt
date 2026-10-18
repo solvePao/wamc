@@ -45,13 +45,19 @@ class MainActivityLifecycleTest {
 
     @Test fun activityRendersAndControlsAnAttachedService() {
         val application = RuntimeEnvironment.getApplication()
+        val manager = application.getSystemService(android.hardware.camera2.CameraManager::class.java)
+        for ((id, facing) in listOf("back" to 1, "front" to 0)) {
+            val characteristics = org.robolectric.shadows.ShadowCameraCharacteristics.newCameraCharacteristics()
+            shadowOf(characteristics).set(android.hardware.camera2.CameraCharacteristics.LENS_FACING, facing)
+            shadowOf(manager).addCamera(id, characteristics)
+        }
         application.getSharedPreferences("wamc_prefs", 0)
             .edit().putBoolean("auto_start", false).apply()
         shadowOf(application).grantPermissions(
             Manifest.permission.CAMERA,
             Manifest.permission.POST_NOTIFICATIONS,
         )
-        val activityController = Robolectric.buildActivity(MainActivity::class.java,
+        val activityController = ActivityTestHarness.build(
             Intent(application, MainActivity::class.java).setAction(UsbManager.ACTION_USB_ACCESSORY_ATTACHED))
             .create().start().resume()
         val activity = activityController.get()
@@ -75,9 +81,23 @@ class MainActivityLifecycleTest {
         val surfaceListener = preview.surfaceTextureListener!!
         surfaceListener.onSurfaceTextureAvailable(texture, 640, 480)
         surfaceListener.onSurfaceTextureSizeChanged(texture, 800, 600)
+        surfaceListener.onSurfaceTextureUpdated(texture)
         assertTrue(surfaceListener.onSurfaceTextureDestroyed(texture))
         texture.release()
 
+        val selector = activity.findViewById<android.widget.Spinner>(R.id.cameraSelector)
+        selector.onItemSelectedListener!!.onItemSelected(selector, null, 0, 0)
+        assertEquals("back", service.currentCameraId)
+        selector.onItemSelectedListener!!.onNothingSelected(selector)
+        service.selectCamera("front")
+        assertEquals(1, selector.selectedItemPosition)
+        activity.findViewById<Switch>(R.id.autoStartToggle).isChecked = true
+        assertTrue(application.getSharedPreferences("wamc_prefs", 0).getBoolean("auto_start", false))
+        activity.findViewById<Switch>(R.id.autoStartToggle).isChecked = false
+        activity.findViewById<View>(R.id.updateMenu).performClick()
+        val menu = org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu()
+        assertNotNull(menu)
+        menu.dismiss()
         val toggle = activity.findViewById<Button>(R.id.toggle)
         assertTrue(toggle.isEnabled)
         toggle.performClick()
@@ -102,7 +122,7 @@ class MainActivityLifecycleTest {
         application.getSharedPreferences("wamc_prefs", 0)
             .edit().putBoolean("auto_start", false).apply()
         shadowOf(application).denyPermissions(Manifest.permission.CAMERA)
-        val activityController = Robolectric.buildActivity(MainActivity::class.java)
+        val activityController = ActivityTestHarness.build()
             .create().start().resume()
         val activity = activityController.get()
         val serviceController = Robolectric.buildService(CameraStreamingService::class.java)
@@ -136,7 +156,7 @@ class MainActivityLifecycleTest {
             .edit().putBoolean("usb_setup_dismissed", false).apply()
         Settings.Global.putInt(application.contentResolver,
             Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 1)
-        val controller = Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
+        val controller = ActivityTestHarness.build().create().start().resume()
         val activity = controller.get()
         assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.usbSetupCard).visibility)
         activity.findViewById<Button>(R.id.btnConfigureUsb).performClick()
@@ -150,12 +170,16 @@ class MainActivityLifecycleTest {
             Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0)
         application.getSharedPreferences("wamc_usb_prefs", 0)
             .edit().putBoolean("usb_setup_dismissed", false).apply()
-        val nonDeveloperController = Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
+        val nonDeveloperController = ActivityTestHarness.build().create().start().resume()
         val nonDeveloperActivity = nonDeveloperController.get()
         nonDeveloperActivity.findViewById<Button>(R.id.btnConfigureUsb).performClick()
         assertEquals(Settings.ACTION_DEVICE_INFO_SETTINGS,
             shadowOf(nonDeveloperActivity).nextStartedActivity.action)
+        nonDeveloperActivity.findViewById<Button>(R.id.btnDismissUsbSetup).performClick()
         nonDeveloperController.pause().stop().destroy()
+        val dismissed = ActivityTestHarness.build().create().start().resume()
+        assertEquals(View.GONE, dismissed.get().findViewById<View>(R.id.usbSetupCard).visibility)
+        dismissed.pause().stop().destroy()
     }
 
     @Test
@@ -164,9 +188,13 @@ class MainActivityLifecycleTest {
         val application = RuntimeEnvironment.getApplication()
         application.getSharedPreferences("wamc_prefs", 0)
             .edit().putBoolean("auto_start", false).apply()
-        val controller = Robolectric.buildActivity(MainActivity::class.java).create().start().resume()
+        val controller = ActivityTestHarness.build().create().start().resume()
         val activity = controller.get()
         assertTrue(activity.window.decorView.systemUiVisibility != 0)
+        activity.findViewById<View>(R.id.mainLayout).dispatchApplyWindowInsets(
+            WindowInsets::class.java.getDeclaredConstructor(android.graphics.Rect::class.java)
+                .newInstance(android.graphics.Rect(1, 2, 3, 4)))
+        assertTrue(activity.findViewById<View>(R.id.mainLayout).paddingTop >= 2)
         controller.pause().stop().destroy()
     }
 
@@ -433,7 +461,7 @@ class MainActivityLifecycleTest {
             Manifest.permission.POST_NOTIFICATIONS,
         )
 
-        val controller = Robolectric.buildActivity(MainActivity::class.java)
+        val controller = ActivityTestHarness.build()
             .create().start().resume()
         val activity = controller.get()
         shadowOf(android.os.Looper.getMainLooper()).idle()

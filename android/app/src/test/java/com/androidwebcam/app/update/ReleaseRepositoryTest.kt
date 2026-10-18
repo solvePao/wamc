@@ -31,6 +31,19 @@ class ReleaseRepositoryTest {
         override fun getResponseCode() = status
         override fun getInputStream() = ByteArrayInputStream(bytes)
     }
+    @Test fun defaultConnectionIsConfiguredWithoutNetworkIo() {
+        val repository = ReleaseRepository()
+        val connection = ReleaseRepository::class.java.getDeclaredMethod("connection", String::class.java)
+            .apply { isAccessible = true }.invoke(repository, "https://example.invalid/release") as HttpURLConnection
+        try {
+            assertEquals("example.invalid", connection.url.host)
+            assertEquals(15_000, connection.connectTimeout)
+            assertEquals(15_000, connection.readTimeout)
+            assertEquals("WAMC-Android-Updater", connection.getRequestProperty("User-Agent"))
+            assertEquals("application/vnd.github+json", connection.getRequestProperty("Accept"))
+        } finally { connection.disconnect() }
+    }
+
     @Test fun validatesReleaseAndRejectsOlderOrUnsupportedBuilds() {
         assertEquals(5L, parse()!!.build)
         assertNull(parse(build = 5)); assertNull(parse(build = 6)); assertNull(parse(sdk = 25))
