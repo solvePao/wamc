@@ -30,7 +30,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Authenticate metadata requests to avoid the anonymous API rate limit.
-          if ! gh api repos/solvePao/wamc-releases/releases/latest \
+          if ! gh api repos/solvePao/wamc/releases/latest \
             > "$RUNNER_TEMP/wamc-release.json"; then
             echo '::error::Publication waits for a public stable WAMC release.'
             exit 1

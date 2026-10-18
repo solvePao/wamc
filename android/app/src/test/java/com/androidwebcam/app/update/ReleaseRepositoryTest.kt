@@ -16,7 +16,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class ReleaseRepositoryTest {
-    private val base = "https://github.com/solvePao/wamc-releases/releases/download/v0.2.1/"
+    private val base = "https://github.com/solvePao/wamc/releases/download/v0.2.1/"
     private val payload = "apk".toByteArray()
     private val hash = MessageDigest.getInstance("SHA-256").digest(payload).joinToString("") { "%02x".format(it) }
     private fun metadata() = JSONObject().put("version", "0.2.1").put("build", 5)

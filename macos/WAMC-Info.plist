@@ -19,7 +19,7 @@
     <key>CFBundleVersion</key>
     <string>3</string>
     <key>SUFeedURL</key>
-    <string>https://github.com/solvePao/wamc-releases/releases/latest/download/appcast.xml</string>
+    <string>https://github.com/solvePao/wamc/releases/latest/download/appcast.xml</string>
     <key>SUEnableAutomaticChecks</key>
     <false/>
     <key>SUAllowsAutomaticUpdates</key>

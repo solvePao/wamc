@@ -16,7 +16,7 @@ class ReleaseRepository(private val connect: (String) -> HttpURLConnection = {
     URL(it).openConnection() as HttpURLConnection
 }) : UpdateReleaseSource {
     override fun latest(installedBuild: Long, sdk: Int): AndroidRelease? {
-        val release = JSONObject(readText("https://api.github.com/repos/solvePao/wamc-releases/releases/latest"))
+        val release = JSONObject(readText("https://api.github.com/repos/solvePao/wamc/releases/latest"))
         if (release.optBoolean("draft") || release.optBoolean("prerelease")) return null
         val tag = release.getString("tag_name")
         val assets = release.getJSONArray("assets")
@@ -109,7 +109,7 @@ class ReleaseRepository(private val connect: (String) -> HttpURLConnection = {
         }
 
         private fun requireAssetUrl(url: String, tag: String, asset: String) {
-            require(url == "https://github.com/solvePao/wamc-releases/releases/download/$tag/$asset") {
+            require(url == "https://github.com/solvePao/wamc/releases/download/$tag/$asset") {
                 "Release asset is outside the configured repository"
             }
         }
