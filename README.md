@@ -2,17 +2,17 @@
 
 Turns a Samsung Android phone into a Mac webcam (Zoom, Meet, Teams,
 FaceTime, OBS) over USB or the same Wi-Fi network — no internet, no cloud.
-Implements `plan.md` in full:
-Phase 1 streaming → Phase 2 virtual camera → Phase 3 AOA/UVC → Phase 4 polish,
-plus Wi-Fi auto-discovery (Bonjour) and a menu-bar background Mac app.
+Uses a shared video pipeline for USB accessory and Wi-Fi streaming, a macOS
+virtual camera, Bonjour discovery, and a menu-bar background app. USB support
+is subject to the hardware validation gate in `docs/ACCESSORY.md`.
 
 **Test matrix for now: Samsung phones + macOS only** (verified device:
 SM-E236B, Android 14). Decisions: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Layout
 
-- `android/` — Kotlin app: Camera2 → MediaCodec H.264 → socket / AOA (`Transport` interface); Bonjour (`NsdManager`, `_wamc._tcp`) advertiser for Wi-Fi discovery
-- `macos/` — SwiftPM menu-bar agent app (`LSUIElement`, launch-at-login): Bonjour browser → receiver → VideoToolbox → preview + virtual camera; `CameraExtension/` holds the CoreMediaIO virtual-camera sources (Xcode target)
+- `android/` — Kotlin app: Camera2 → MediaCodec H.264 → TCP / AOA USB (`Transport` interface); Bonjour (`NsdManager`, `_wamc._tcp`) advertiser for Wi-Fi discovery
+- `macos/` — SwiftPM menu-bar agent app (`LSUIElement`, launch-at-login): AOA USB / Bonjour discovery → receiver → VideoToolbox → preview + virtual camera; `CameraExtension/` holds the CoreMediaIO virtual-camera sources (Xcode target)
 - `shared/protocol/PROTOCOL.md` — AWC1 wire format, golden-vector tested both sides
 - `iterative-testing.md` — Build, signing, first-run setup, DMG validation, and live-camera test runbook
 
@@ -61,16 +61,19 @@ The current DMG is a development build for registered Macs.
 
 **Android dashboard:** All camera controls stay on one screen: camera and quality selectors, Enhance image, Auto-start, Wi-Fi discovery, and a pinned Start/Stop button. Switch camera and Rotate sit on the square preview, moving into the control group when space is tight. Landscape places the preview beside the controls; compact windows and large text can scroll the control area while Start/Stop remains visible. Quality changes apply the next time streaming starts.
 
-**USB (preferred):**
+**USB accessory (ADB-free):**
 
-1. Plug the Samsung phone in by USB and open the Android app — it starts streaming the front camera on its own (toggle **Auto-start** off to go manual).
-2. On the Mac app: it connects on plug and starts the camera by itself. Pick Best (HEVC when negotiated, else max-rate AVC), 1080p high, or 720p balanced. **Stop** stays stopped until replug.
+1. Connect a Samsung phone with a USB data cable, unlock it, and open WAMC on both devices.
+2. Approve Android camera/accessory access when requested. Developer mode, USB debugging, tethering, and Mac Platform Tools are not required.
+3. Select **USB accessory**, then **Start stream** (or keep automatic streaming enabled). USB compatibility depends on the phone and Mac; failed setup offers Retry and Wi-Fi/hotspot guidance. See [USB support and validation](docs/ACCESSORY.md).
+
+**ADB is development-only:** Enable **Developer tools → Use ADB transport** and explicitly select **ADB (development)**. Developers still use ADB for APK installation, logs and debugging; users do not install it for streaming. Consumer launch does not search for or run ADB.
 
 **Wi-Fi (automatic, no IP to type):**
 
 1. Put the phone and Mac on the same Wi-Fi network. Open WAMC on the phone (keep **Wi-Fi discovery** on) — the phone advertises itself via Bonjour (`_wamc._tcp`) with a stable device ID.
-2. The Mac finds it automatically in the menu bar / window. The first time, click **Trust & Connect** (Bonjour alone can be spoofed on a LAN, so an unknown device is never auto-connected). After that it auto-connects on sight. Plugging USB in takes over; unplugging falls back to trusted Wi-Fi.
-3. If your router blocks discovery (AP isolation), use the manual address field in the window as a fallback.
+2. The Mac finds it automatically in the menu bar / window. The first time, click **Trust & Connect** (Bonjour alone can be spoofed on a LAN, so an unknown device is never auto-connected). After that it auto-connects on sight. Available USB accessory connections are preferred during automatic selection; USB failure can fall back to a trusted Wi-Fi phone when automatic streaming is enabled. Explicit source selection and Stop remain authoritative.
+3. If your network blocks discovery, use the manual address field when direct reachability is available. A phone hotspot is another option. Compatible USB tethering can also use a manual network address, but enabling tethering alone does not guarantee macOS support.
 
 **Mac background app:** After setup, WAMC runs in the menu bar with no Dock icon or window. It registers for launch-at-login by default (toggle **Launch at login** in Preferences in the menu/window; approve in System Settings → Login Items if asked). The menu bar shows connection and virtual-camera readiness, with Start/Stop and grouped camera, connection, preference, and troubleshooting controls. **Open WAMC** opens the preview window on demand, including live codec/FPS/bitrate diagnostics; closing it returns to background (the virtual camera keeps receiving frames).
 

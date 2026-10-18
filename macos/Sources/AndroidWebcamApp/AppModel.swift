@@ -5,15 +5,24 @@ import Network
 import Combine
 import AndroidWebcamCore
 import AndroidWebcamProtocol
+import AccessoryUSB
 
 protocol DeviceInventory: Sendable {
     func listAndroidDevices() -> [AndroidDevice]
+    func listDevelopmentDevices() -> [AndroidDevice]
     func nativeUVCWebcams() -> [String]
     func configureDefaultUsbMode(serial: String?) -> Bool
 }
 
+extension DeviceInventory {
+    func listDevelopmentDevices() -> [AndroidDevice] { [] }
+}
+
 struct SystemDeviceInventory: DeviceInventory {
-    func listAndroidDevices() -> [AndroidDevice] { DeviceDiscovery.listAndroidDevices() }
+    func listAndroidDevices() -> [AndroidDevice] {
+        AccessoryDevice.discover().map { AndroidDevice(id: $0.id, model: $0.name, state: "device") }
+    }
+    func listDevelopmentDevices() -> [AndroidDevice] { DeviceDiscovery.listAndroidDevices() }
     func nativeUVCWebcams() -> [String] { DeviceDiscovery.nativeUVCWebcams() }
     func configureDefaultUsbMode(serial: String?) -> Bool {
         DeviceDiscovery.configureDefaultUsbMode(serial: serial)
@@ -35,13 +44,16 @@ enum QualityMode: String, CaseIterable, Identifiable {
     var height: Int { self == .balanced ? 720 : 1080 }
 }
 
-/// Orchestrates discovery → connect (USB via adb forward, or Wi-Fi via
+/// Orchestrates discovery → connect (USB accessory, or Wi-Fi via
 /// Bonjour) → decode → preview/extension. USB is preferred; exactly one
 /// transport is active at a time, owned by ConnectionController.
 @MainActor
 final class AppModel: ObservableObject {
     @Published var devices: [AndroidDevice] = []
     @Published var nativeWebcams: [String] = []
+    @Published private(set) var platformToolsAvailable = false
+    @Published private(set) var usbModeMessage: String?
+    @Published private(set) var configuringUsbMode = false
     let connection: ConnectionController
     lazy var session = SessionModel(preferences: preferences, connection: connection)
     var connected: Bool { connection.state.isConnected }
@@ -52,6 +64,7 @@ final class AppModel: ObservableObject {
     let cameraHealth: VirtualCameraHealthMonitor
     private var cameraHealthEnabled = false
     private var cameraHealthObservation: AnyCancellable?
+    private var wifiStatusObservation: AnyCancellable?
     @Published var deviceInfo: [String: String] = [:]
     let diagnostics = StreamDiagnostics()
     private(set) var stats: StreamStats {
@@ -62,6 +75,17 @@ final class AppModel: ObservableObject {
     /// diagnostics views at ≤1 Hz. Open controls never observe this publisher.
     private var liveStats = StreamStats()
     private var statsGate = PublishGate(interval: 1.0)
+    @Published var developmentADBEnabled = false {
+        didSet {
+            preferences.set(developmentADBEnabled, forKey: "wamc.developmentADBEnabled")
+            if !developmentADBEnabled, case .adb = selectedSource {
+                session.stop()
+                session.select(.usb(serial: nil))
+            }
+            refreshDevices()
+        }
+    }
+    @Published private(set) var developmentDevices: [AndroidDevice] = []
     @Published var statusText = "Plug in your Samsung phone with USB, or open WAMC on the phone on the same Wi-Fi."
     /// Phone streams the front camera by default; this mirrors that.
     @Published var facingBack = false
@@ -134,6 +158,7 @@ final class AppModel: ObservableObject {
          now: @escaping () -> Date = Date.init) {
         cameraHealth = cameraHealthMonitor ?? VirtualCameraHealthMonitor()
         self.preferences = preferences
+        self.developmentADBEnabled = preferences.bool(forKey: "wamc.developmentADBEnabled")
         trustedStore = TrustedDeviceStore(preferences: preferences)
         launchAtLogin = loginItem ?? LaunchAtLogin(defaults: preferences)
         wifiDiscovery = discovery ?? WifiDiscovery()
@@ -144,6 +169,12 @@ final class AppModel: ObservableObject {
         self.deviceInventory = deviceInventory
         setup = setupModel ?? SetupModel(preferences: preferences)
         cameraHealthEnabled = startServices
+        setup.hasVerifiedVideo = { [weak self] in
+            guard let self else { return false }
+            return self.connected && self.feedState == .live && self.virtualCameraSendingFrames
+                && self.cameraHealth.health.output == .ready
+        }
+        setup.onRegistrationAvailable = { [weak self] in self?.checkCameraOutput() }
         cameraHealthObservation = cameraHealth.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -209,6 +240,10 @@ final class AppModel: ObservableObject {
                 self.stats.decodeErrors = self.liveStats.decodeErrors
                 self.connection.sendControl([("cmd", "requestKeyframe")])
             }
+        }
+        wifiStatusObservation = wifiDiscovery.$statusText.sink { [weak self] status in
+            guard let self, self.wifiStatusText != status else { return }
+            self.wifiStatusText = status
         }
         wifiDiscovery.onDevicesChanged = { [weak self] found in
             Task { @MainActor in
@@ -326,14 +361,37 @@ final class AppModel: ObservableObject {
 
     // MARK: - Discovery / watchdog
 
-    func refreshDevices() { pollDevices() }
+    func refreshDevices() {
+        wifiDiscovery.refresh()
+        pollDevices()
+    }
+
+    func recoverSetup() {
+        setup.refresh()
+        wifiDiscovery.refresh(recoverOnly: true)
+        pollDevices()
+        checkCameraOutput()
+    }
 
     func configureDeviceDefaultUsb() {
-        let serial = devices.first(where: { $0.state == "device" })?.id
-        guard let serial else { return }
+        guard developmentADBEnabled else { return }
+        let serial = developmentDevices.first(where: { $0.state == "device" })?.id
+        guard !configuringUsbMode else { return }
+        guard let serial else {
+            usbModeMessage = "Connect and authorize a USB debugging phone before changing its USB mode."
+            return
+        }
+        configuringUsbMode = true
+        usbModeMessage = "Setting File Transfer mode…"
         let inventory = deviceInventory
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = inventory.configureDefaultUsbMode(serial: serial)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let succeeded = inventory.configureDefaultUsbMode(serial: serial)
+            Task { @MainActor in
+                guard let self else { return }
+                self.configuringUsbMode = false
+                self.usbModeMessage = succeeded ? "File Transfer mode enabled."
+                    : "Could not change USB mode. Unlock the phone and choose File Transfer in its USB settings."
+            }
         }
     }
 
@@ -341,21 +399,27 @@ final class AppModel: ObservableObject {
     /// until it is disconnected or fails, even while a cable is attached.
     private func pollDevices() {
         syncLaunchAtLogin()
+        let toolsAvailable = developmentADBEnabled && DeviceDiscovery.adbPath() != nil
+        if platformToolsAvailable != toolsAvailable { platformToolsAvailable = toolsAvailable }
         let wifiStatus = wifiDiscovery.statusText
         if wifiStatusText != wifiStatus { wifiStatusText = wifiStatus }
         guard !pollInProgress else { return }
         pollInProgress = true
         let inventory = deviceInventory
+        let includeADB = developmentADBEnabled
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let found = inventory.listAndroidDevices()
+            let development = includeADB ? inventory.listDevelopmentDevices() : []
             let uvc = inventory.nativeUVCWebcams()
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.pollInProgress = false
+                if self.developmentDevices != development { self.developmentDevices = development }
+                self.connection.updateUSBReadiness(development)
                 if self.devices != found { self.devices = found }
                 if self.nativeWebcams != uvc { self.nativeWebcams = uvc }
                 self.connection.updateAvailableTargets(
-                    found.map { .usb(serial: $0.id) } + self.discoveredDevices.map { .wifi($0) })
+                    found.map { .usb(serial: $0.id) } + development.map { .adb(serial: $0.id) } + self.discoveredDevices.map { .wifi($0) })
                 if case .connected(.usb(let serial)) = self.connectionState,
                    !found.contains(where: { $0.id == serial && $0.state == "device" }) {
                     self.connection.usbWasRemoved()
@@ -501,6 +565,8 @@ final class AppModel: ObservableObject {
     }
 
     var transportLabel: String {
+        if case .adb = connection.state.target { return "ADB (development)" }
+        if case .address = connection.state.target { return "Network (manual)" }
         switch activeTransport {
         case .usb: return "USB"
         case .wifi: return "Wi-Fi"
@@ -542,6 +608,7 @@ final class AppModel: ObservableObject {
     }
 
     func checkCameraOutput() {
+        if setup.sinkRegistered && !extensionBridge.available { extensionBridge.discoverSink() }
         updateCameraHealth()
         cameraHealth.checkAgain()
     }

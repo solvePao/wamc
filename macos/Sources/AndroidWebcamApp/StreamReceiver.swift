@@ -7,8 +7,15 @@ import OSLog
 protocol StreamTransport: AnyObject {
     var onEvent: ((UUID, StreamReceiver.Event) -> Void)? { get set }
     func start(endpoint: NWEndpoint, attempt: UUID)
+    func startAccessory(deviceID: String?, attempt: UUID)
     func stop()
     func sendControl(_ fields: [(String, String)], attempt: UUID, completion: (() -> Void)?)
+}
+
+extension StreamTransport {
+    func startAccessory(deviceID: String?, attempt: UUID) {
+        onEvent?(attempt, .transportFailed("USB accessory transport is unavailable."))
+    }
 }
 
 protocol StreamConnection: AnyObject {
@@ -46,7 +53,9 @@ final class NetworkStreamConnection: StreamConnection {
 /// carries the attempt that produced it; cancellation cannot revive an old dial.
 final class StreamReceiver: StreamTransport {
     enum Event {
+        case accessorySelected(String)
         case transportReady
+        case transportFailed(String)
         case transportLost
         case video(Data, Int64, Bool)
         case config(WireProtocol.Config)
@@ -58,9 +67,11 @@ final class StreamReceiver: StreamTransport {
     private let queue: DispatchQueue
     private let makeConnection: (NWEndpoint) -> StreamConnection
     private let scheduleReconnect: (TimeInterval, @escaping () -> Void) -> Void
-    private var connection: StreamConnection?
+    private var connection: ByteConnection?
     private var attempt: UUID?
     private var endpoint: NWEndpoint?
+    private var accessoryID: String?
+    private var usesAccessory = false
     private var parser = FrameParser()
     private var reconnect = ReconnectPolicy()
 
@@ -78,7 +89,19 @@ final class StreamReceiver: StreamTransport {
         queue.async { [self] in
             stopOnQueue()
             self.attempt = attempt
+            self.usesAccessory = false
             self.endpoint = endpoint
+            reconnect.reset()
+            connect(attempt: attempt)
+        }
+    }
+
+    func startAccessory(deviceID: String?, attempt: UUID) {
+        queue.async { [self] in
+            stopOnQueue()
+            self.attempt = attempt
+            self.usesAccessory = true
+            self.accessoryID = deviceID
             reconnect.reset()
             connect(attempt: attempt)
         }
@@ -97,9 +120,10 @@ final class StreamReceiver: StreamTransport {
                 completion?()
                 return
             }
-            connection.send(content: frame, completion: { error in
+            connection.send(frame, completion: { error in
                 if let error {
                     AppLogger.connection.error("Sending stream control frame failed: \(error.localizedDescription, privacy: .private)")
+                    self.reconnect(attempt: attempt, connection: connection)
                 }
                 completion?()
             })
@@ -117,39 +141,53 @@ final class StreamReceiver: StreamTransport {
     private func stopOnQueue() {
         attempt = nil
         endpoint = nil
-        connection?.stateUpdateHandler = nil
+        accessoryID = nil
+        usesAccessory = false
+        connection?.onStateChange = nil
         connection?.cancel()
         connection = nil
         parser = FrameParser()
     }
 
     private func connect(attempt: UUID) {
-        guard self.attempt == attempt, let endpoint else { return }
+        guard self.attempt == attempt else { return }
+        let conn: ByteConnection
+        if usesAccessory {
+            conn = AccessoryByteConnection(deviceID: accessoryID)
+        } else if let endpoint {
+            conn = TCPByteConnection(makeConnection(endpoint))
+        } else { return }
         parser = FrameParser()
-        let conn = makeConnection(endpoint)
         connection = conn
-        conn.stateUpdateHandler = { [weak self] state in
+        conn.onStateChange = { [weak self] state in
             guard let self, self.attempt == attempt, self.connection === conn else { return }
             switch state {
             case .ready:
                 self.reconnect.reset()
+                if self.usesAccessory, let sourceID = conn.sourceID {
+                    self.accessoryID = sourceID
+                    self.onEvent?(attempt, .accessorySelected(sourceID))
+                }
                 self.onEvent?(attempt, .transportReady)
                 self.receiveLoop(conn, attempt: attempt)
             case .failed(let error):
-                AppLogger.connection.error("Network connection to \(Self.describe(endpoint), privacy: .private) failed: \(error.localizedDescription, privacy: .private)")
-                self.reconnect(attempt: attempt, connection: conn)
+                AppLogger.connection.error("Connection failed: \(error.localizedDescription, privacy: .private)")
+                if self.usesAccessory {
+                    self.onEvent?(attempt, .transportFailed(error.localizedDescription))
+                } else {
+                    self.reconnect(attempt: attempt, connection: conn)
+                }
             case .cancelled:
                 self.reconnect(attempt: attempt, connection: conn)
-            default: break
             }
         }
         conn.start(queue: queue)
     }
 
-    private func reconnect(attempt: UUID, connection conn: StreamConnection) {
+    private func reconnect(attempt: UUID, connection conn: ByteConnection) {
         guard self.attempt == attempt, self.connection === conn else { return }
         self.connection = nil
-        conn.stateUpdateHandler = nil
+        conn.onStateChange = nil
         conn.cancel()
         self.onEvent?(attempt, .transportLost)
         let delay = self.reconnect.nextDelay()
@@ -158,7 +196,7 @@ final class StreamReceiver: StreamTransport {
         }
     }
 
-    private func receiveLoop(_ conn: StreamConnection, attempt: UUID) {
+    private func receiveLoop(_ conn: ByteConnection, attempt: UUID) {
         conn.receive {
             [weak self] data, isComplete, error in
             guard let self, self.attempt == attempt, self.connection === conn else { return }
@@ -177,9 +215,9 @@ final class StreamReceiver: StreamTransport {
             }
             if let error {
                 AppLogger.connection.error("Receiving stream data failed: \(error.localizedDescription, privacy: .private)")
-                conn.cancel()
+                self.reconnect(attempt: attempt, connection: conn)
             } else if isComplete {
-                conn.cancel()
+                self.reconnect(attempt: attempt, connection: conn)
             } else {
                 self.receiveLoop(conn, attempt: attempt)
             }

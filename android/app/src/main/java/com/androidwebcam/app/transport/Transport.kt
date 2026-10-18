@@ -6,6 +6,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 /** One bidirectional AWC1 stream (TCP socket or USB accessory). */
@@ -103,9 +104,10 @@ class TransportHub {
         thread(name = "awc-writer", isDaemon = true) {
             var sinceLog = 0
             while (peer.alive) {
-                val queued = runCatching { peer.queue.take() }
+                val queued = runCatching { peer.queue.poll(250, TimeUnit.MILLISECONDS) }
                     .onFailure { AppLog.debug("TransportHub", "writer queue interrupted: ${it.message}") }
-                    .getOrNull() ?: break
+                    .getOrNull() ?: continue
+                if (!peer.alive) break
                 val writeStartNs = System.nanoTime()
                 val ok = runCatching { WireProtocol.writeFrame(output, queued.frame) }
                     .onFailure {

@@ -8,11 +8,9 @@ struct SetupView: View {
     @ObservedObject private var camera: CameraExtensionManager
     @ObservedObject private var wifi: WifiDiscovery
     @ObservedObject private var diagnostics: StreamDiagnostics
-    private let platformToolsAvailable: Bool
 
-    init(model: AppModel, platformToolsAvailable: Bool = DeviceDiscovery.adbPath() != nil) {
+    init(model: AppModel, platformToolsAvailable: Bool = false) {
         self.model = model
-        self.platformToolsAvailable = platformToolsAvailable
         setup = model.setup
         camera = model.extensionManager
         wifi = model.wifiDiscovery
@@ -60,8 +58,17 @@ struct SetupView: View {
                         if let error = setup.operationError { Text(error).foregroundStyle(.red) }
                         SetupRow(title: "Enable Android Camera", ready: camera.status == .active && setup.sinkRegistered,
                                  detail: cameraDetail) {
-                            Button(cameraAction, action: setup.activateCamera)
-                                .disabled(!setup.installed || setup.packageIssue != nil || camera.status == .activating || camera.status == .requiresRestart)
+                            if camera.status != .active {
+                                Button(cameraAction, action: setup.activateCamera)
+                                    .disabled(!setup.installed || setup.packageIssue != nil || camera.status == .activating || camera.status == .requiresRestart)
+                            }
+                            if camera.status == .active || isCameraFailure {
+                                Button("Repair Camera", action: setup.repairCamera)
+                                    .disabled(!setup.installed || setup.packageIssue != nil)
+                            }
+                        }
+                        if let error = camera.lastRequestError {
+                            Text(error).font(.caption).foregroundStyle(.red)
                         }
                         SetupRow(title: "Camera access", ready: setup.cameraAuthorization == .authorized,
                                  detail: "Allow WAMC to discover webcams and verify Android Camera output. Meeting apps request their own camera access.") {
@@ -74,20 +81,33 @@ struct SetupView: View {
                     CameraHealthView(model: model)
                     Divider()
                     ControlSection(title: "Your phone", symbol: "iphone.gen3") {
-                        SetupRow(title: "Connect your phone", ready: model.connected,
+                        SetupRow(title: "Connect your phone", ready: model.feedState == .live,
                                  detail: model.connected ? "Connected over \(model.transportLabel). Keep the camera running on your phone." : "Open WAMC on Android and allow its camera. Connect a USB data cable, or trust your phone on the same Wi-Fi.") {
                             Button("Refresh Phones", action: model.refreshDevices)
                         }
-                        SetupRow(title: "USB connection", ready: platformToolsAvailable,
-                                 detail: !platformToolsAvailable ? "USB needs Android Platform Tools. Wi-Fi works without them." : "Platform Tools found. Unlock your phone and accept “Allow USB debugging” when prompted.") {
-                            if !platformToolsAvailable {
-                                Link("Get Platform Tools", destination: URL(string: "https://developer.android.com/tools/releases/platform-tools")!)
-                            } else {
+                        ConnectionControls(model: model)
+                        SessionControls(model: model)
+                        SetupRow(title: "USB accessory connection", ready: model.activeTransport == .usb && model.connected,
+                                 detail: "Connect a USB data cable, unlock Android, open WAMC and approve accessory access. WAMC uses accessory USB without Platform Tools. Compatibility varies by phone; if USB setup fails, use Wi-Fi or a phone hotspot.") {
+                            Button("Refresh Phones", action: model.refreshDevices)
+                        }
+                        if model.developmentADBEnabled {
+                            SetupRow(title: "USB debugging tools", ready: model.platformToolsAvailable,
+                                     detail: model.platformToolsAvailable
+                                        ? "Platform Tools found. Authorize USB debugging on your phone."
+                                        : "ADB needs Android Platform Tools. USB accessory and Wi-Fi work without them.") {
+                                if !model.platformToolsAvailable {
+                                    Link("Get Platform Tools", destination: URL(string: "https://developer.android.com/tools/releases/platform-tools")!)
+                                }
                                 Button("Set File Transfer Mode", action: model.configureDeviceDefaultUsb)
+                                    .disabled(!model.platformToolsAvailable || model.configuringUsbMode)
+                                if let message = model.usbModeMessage {
+                                    Text(message).font(.caption).fixedSize(horizontal: false, vertical: true)
+                                }
                             }
                         }
                         SetupRow(title: "Wi-Fi connection", ready: !model.discoveredDevices.isEmpty || model.activeTransport == .wifi,
-                                 detail: "\(wifi.statusText). Allow Local Network access, then select the phone and use Start stream in the main window.") {
+                                 detail: "\(wifi.statusText). Allow Local Network access, then select your phone above and start the stream.") {
                             Button("Local Network Settings", action: openLocalNetworkSettings)
                         }
                     }
@@ -118,12 +138,12 @@ struct SetupView: View {
                 Button("Finish Setup", action: setup.finish)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!setup.installed || setup.packageIssue != nil || camera.status != .active || !setup.sinkRegistered)
+                    .disabled(!setup.canFinish)
             }
             .padding(20)
         }
         .frame(width: 600, height: 640)
-        .onAppear { setup.refresh() }
+        .onAppear { model.recoverSetup() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification),
                    perform: applicationBecameActive)
     }
@@ -144,11 +164,16 @@ struct SetupView: View {
     }
 
     func dismissSetup() { setup.showSetup = false }
-    func applicationBecameActive(_ notification: Notification) { setup.refresh() }
+    func applicationBecameActive(_ notification: Notification) { model.recoverSetup() }
+
+    private var isCameraFailure: Bool {
+        if case .failed = camera.status { return true }
+        return false
+    }
 
     private var cameraDetail: String {
         if camera.status == .active {
-            return setup.sinkRegistered ? "Android Camera is enabled and its video input is registered." : "Enabled; waiting for the camera device to register. Try Install / Repair if this persists."
+            return setup.sinkRegistered ? "Android Camera is enabled and its video input is registered." : "Waiting for Android Camera to register. Use Repair Camera if this persists."
         }
         return camera.status.description + ". In Camera Extensions, turn on WAMC → Android Camera."
     }
@@ -158,7 +183,8 @@ struct SetupView: View {
         case .requiresApproval, .disabled: return "Open Camera Extensions"
         case .activating: return "Installing…"
         case .requiresRestart: return "Restart Required"
-        default: return "Install / Repair Camera"
+        case .active: return "Camera enabled"
+        default: return "Enable Android Camera"
         }
     }
 

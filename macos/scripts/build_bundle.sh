@@ -38,6 +38,8 @@ SYSEXT_DIR="$APP_DIR/Contents/Library/SystemExtensions/com.androidwebcam.app.Cam
 echo "==> Creating application structure in $APP_DIR..."
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
+cp "$MACOS_DIR/Vendor/libusb/COPYING" "$APP_DIR/Contents/Resources/libusb-LICENSE.txt"
+cp "$MACOS_DIR/Vendor/libusb/README.md" "$APP_DIR/Contents/Resources/libusb-SOURCE.md"
 mkdir -p "$SYSEXT_DIR/Contents/MacOS"
 
 echo "==> Copying host app binary and Info.plist..."

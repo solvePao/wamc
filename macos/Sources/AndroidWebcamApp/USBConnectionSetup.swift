@@ -1,6 +1,7 @@
 import AndroidWebcamCore
 import Darwin
 import Foundation
+import OSLog
 
 protocol USBConnectionPreparing: AnyObject, Sendable {
     func cancel()
@@ -19,7 +20,7 @@ final class USBConnectionSetup: USBConnectionPreparing, @unchecked Sendable {
     private let commands: ADBCommandExecuting
     private let adbPath: () -> String?
 
-    /// Deadline is absolute system uptime, shared with the connection attempt.
+    /// Deadline is absolute system uptime for USB preparation only.
     init(deadline: TimeInterval,
          adbPath: @escaping () -> String? = DeviceDiscovery.adbPath,
          commands: ADBCommandExecuting = ADBCommandRunner()) {
@@ -31,9 +32,16 @@ final class USBConnectionSetup: USBConnectionPreparing, @unchecked Sendable {
     func cancel() { commands.cancel() }
 
     func prepare(preferredSerial: String?) throws -> PreparedConnection {
+        let started = ProcessInfo.processInfo.systemUptime
+        defer {
+            let elapsed = ProcessInfo.processInfo.systemUptime - started
+            AppLogger.connection.info("ADB preparation finished after \(elapsed, privacy: .public) seconds")
+        }
+        AppLogger.connection.info("ADB preparation: locating Platform Tools")
         guard let adb = adbPath() else {
             throw USBSetupError.message("ADB was not found. Install Android platform tools, then reconnect.")
         }
+        AppLogger.connection.info("ADB preparation: reading USB inventory")
         let output = try commands.run(adb, ["devices", "-l"], deadline: deadline)
         let devices = AdbDeviceList.parseDetailed(output).filter(\.isPhysicalUSB)
         let device: AdbDevice
@@ -60,22 +68,9 @@ final class USBConnectionSetup: USBConnectionPreparing, @unchecked Sendable {
         }
 
         let prefix = ["-s", device.serial]
-        var warnings: [String] = []
-        for operation in ["setScreenUnlockedFunctions", "setFunctions"] {
-            do {
-                _ = try commands.run(adb, prefix + ["shell", "svc", "usb", operation, "mtp"],
-                                     deadline: deadline)
-            } catch let error as USBSetupError {
-                if case .commandFailed(let detail) = error {
-                    warnings.append("USB mode could not be changed: \(detail)")
-                } else {
-                    throw error
-                }
-            }
-        }
-
         // Know the port before spawning ADB, so cancellation can always remove
         // a forward even if ADB is interrupted before returning its output.
+        AppLogger.connection.info("ADB preparation: forwarding stream port")
         let port = try Self.reserveForwardingPort()
         do {
             _ = try commands.run(adb,
@@ -92,7 +87,7 @@ final class USBConnectionSetup: USBConnectionPreparing, @unchecked Sendable {
             Self.removeForward(serial: device.serial, port: port)
             throw error
         }
-        return PreparedConnection(serial: device.serial, port: port, warnings: warnings)
+        return PreparedConnection(serial: device.serial, port: port, warnings: [])
     }
 
     private static func reserveForwardingPort() throws -> UInt16 {
@@ -145,7 +140,7 @@ enum USBSetupError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .cancelled: return "USB connection cancelled."
-        case .timedOut: return "USB connection timed out after 5 seconds. Check the phone and try again."
+        case .timedOut: return "USB preparation timed out. Unlock the phone, check USB debugging, and try again."
         case .commandFailed(let detail), .message(let detail): return detail
         }
     }

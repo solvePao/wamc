@@ -43,12 +43,19 @@ struct StableMenuContent: View, Equatable {
         Menu("Source") { sourceItems }
 
         Menu("Preferences") { preferenceItems }
+        Menu("Developer tools") {
+            Toggle("Use ADB transport", isOn: Binding(
+                get: { snapshot.developmentADBEnabled }, set: { model.developmentADBEnabled = $0 }))
+            if snapshot.developmentADBEnabled {
+                sourceButton(snapshot.adb)
+                Button("Set USB File Transfer", action: model.configureDeviceDefaultUsb)
+            }
+        }
         Divider()
         Button("Setup & Diagnostics", action: commands.showSetup)
         Menu("Troubleshooting") {
             Button("Check camera output", action: model.checkCameraOutput)
             Button("Camera Extension Settings", action: model.extensionManager.openSystemSettings)
-            Button("Set USB File Transfer", action: model.configureDeviceDefaultUsb)
         }
         Divider()
         if let updater { UpdateMenuItem(updater: updater) }
@@ -84,6 +91,7 @@ struct StableMenuContent: View, Equatable {
     @ViewBuilder var sourceItems: some View {
             let commands = MenuCommands(model: model, windows: openWindow)
             sourceButton(snapshot.usb)
+            if snapshot.developmentADBEnabled { sourceButton(snapshot.adb) }
             ForEach(snapshot.phones) { phone in
                 sourceButton(phone.source)
             }
@@ -147,6 +155,8 @@ struct MenuSnapshot: Equatable {
     let connectionState: ConnectionState
     let selectedSource: ConnectionTarget
     let usb: Source
+    let adb: Source
+    let developmentADBEnabled: Bool
     let manualSources: [Source]
     let facingBack: Bool
     let quality: QualityMode
@@ -165,7 +175,9 @@ struct MenuSnapshot: Equatable {
         feedState = model.feedState
         connectionState = model.connectionState
         selectedSource = model.selectedSource
-        usb = Source(target: .usb(serial: nil), title: "USB", model: model)
+        usb = Source(target: .usb(serial: nil), title: "USB accessory", model: model)
+        adb = Source(target: .adb(serial: nil), title: "ADB (development)", model: model)
+        developmentADBEnabled = model.developmentADBEnabled
         var addresses: [ConnectionTarget] = []
         if case .address = model.selectedSource { addresses.append(model.selectedSource) }
         if let active = model.connectionState.target, case .address = active,

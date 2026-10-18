@@ -7,16 +7,19 @@ import OSLog
 /// The selected identity stays attached to connecting, connected and teardown states.
 enum ConnectionTarget: Equatable {
     case usb(serial: String?)
+    case adb(serial: String?)
     case wifi(DiscoveredDevice)
     case address(String, UInt16)
 
     var transport: TransportKind {
         if case .usb = self { return .usb }
+        if case .adb = self { return .usb }
         return .wifi
     }
 
     var key: String {
         switch self {
+        case .adb(let serial): return "adb:\(serial ?? "auto")"
         case .usb(let serial): return "usb:\(serial ?? "auto")"
         case .wifi(let device): return "wifi:\(device.id)"
         case .address(let host, let port): return "address:\(host):\(port)"
@@ -25,7 +28,8 @@ enum ConnectionTarget: Equatable {
 
     var label: String {
         switch self {
-        case .usb: return "USB"
+        case .usb: return "USB accessory"
+        case .adb: return "ADB (development)"
         case .wifi(let device): return device.displayName
         case .address(let host, let port): return "\(host):\(port)"
         }
@@ -70,6 +74,7 @@ final class ConnectionController: ObservableObject {
     var onStreamEvent: ((StreamReceiver.Event) -> Void)?
 
     private let connectionTimeout: Duration
+    private let usbPreparationTimeout: TimeInterval
     private let stopTimeout: Duration
     private let receiver: StreamTransport
     private var attempt = UUID()
@@ -80,15 +85,19 @@ final class ConnectionController: ObservableObject {
     private var forwarded: USBConnectionSetup.PreparedConnection?
     private var blockedTargets: Set<String> = []
     private var availableUSBKeys: Set<String> = []
+    private var usbReadiness: [String: String] = [:]
+    private var accessoryIdentities: [String: String] = [:]
     private var disconnectCompletions: [() -> Void] = []
 
     init(receiver: StreamTransport = StreamReceiver(),
          connectionTimeout: Duration = .seconds(5), stopTimeout: Duration = .milliseconds(500),
+         usbPreparationTimeout: TimeInterval = 15,
          makeUSBSetup: @escaping (TimeInterval) -> any USBConnectionPreparing = { USBConnectionSetup(deadline: $0) },
          removeForward: @escaping @Sendable (String, UInt16) -> Void = USBConnectionSetup.removeForward) {
         self.makeUSBSetup = makeUSBSetup
         self.removeForward = removeForward
         self.connectionTimeout = connectionTimeout
+        self.usbPreparationTimeout = usbPreparationTimeout
         self.stopTimeout = stopTimeout
         self.receiver = receiver
         receiver.onEvent = { [weak self] attempt, event in
@@ -97,16 +106,37 @@ final class ConnectionController: ObservableObject {
     }
 
     func canAutomaticallyConnect(to target: ConnectionTarget) -> Bool {
-        !automaticConnectionSuppressed && !blockedTargets.contains(target.key)
-            && (target.transport != .usb || !blockedTargets.contains("usb:auto"))
+        let autoKey: String
+        switch target {
+        case .usb: autoKey = "usb:auto"
+        case .adb: autoKey = "adb:auto"
+        default: autoKey = target.key
+        }
+        return !automaticConnectionSuppressed && !blockedTargets.contains(target.key)
+            && !blockedTargets.contains(autoKey)
+    }
+
+    func updateUSBReadiness(_ devices: [AndroidDevice]) {
+        let next = Dictionary(devices.map { ($0.id, $0.state) }, uniquingKeysWith: { _, latest in latest })
+        for (serial, state) in next where state == "device" && usbReadiness[serial] != "device" {
+            blockedTargets.remove("adb:\(serial)")
+            blockedTargets.remove("adb:auto")
+        }
+        usbReadiness = next
     }
 
     func updateAvailableTargets(_ targets: [ConnectionTarget]) {
         let usbKeys = Set(targets.filter { $0.transport == .usb }.map(\.key))
-        if usbKeys != availableUSBKeys { blockedTargets.remove("usb:auto") }
+        if usbKeys != availableUSBKeys {
+            blockedTargets.remove("usb:auto")
+            blockedTargets.remove("adb:auto")
+        }
         availableUSBKeys = usbKeys
         var available = Set(targets.map(\.key))
-        if !usbKeys.isEmpty { available.insert("usb:auto") }
+        if !usbKeys.isEmpty {
+            available.insert("usb:auto")
+            available.insert("adb:auto")
+        }
         blockedTargets.formIntersection(available)
     }
 
@@ -124,11 +154,24 @@ final class ConnectionController: ObservableObject {
         let id = UUID()
         attempt = id
         transition(.connecting(target), "Connecting to \(target.label)…")
-        let deadline = ProcessInfo.processInfo.systemUptime + 5
-        armTimeout(attempt: id, message: "Could not connect to \(target.label) within 5 seconds.")
+        let isAccessory: Bool
+        if case .usb = target { isAccessory = true } else { isAccessory = false }
+        if isAccessory {
+            armTimeout(attempt: id,
+                message: "USB setup timed out. Unlock the phone, open WAMC and approve accessory access, then retry or use Wi-Fi/hotspot.",
+                delay: .seconds(30))
+        } else if case .adb = target {
+            armTimeout(attempt: id, message: "USB preparation timed out. Check debugging authorization and try again.",
+                       delay: .seconds(usbPreparationTimeout))
+        } else {
+            armTimeout(attempt: id, message: "Could not connect to \(target.label). Check the phone and try again.")
+        }
         switch target {
-        case .usb(let serial):
-            let setup = makeUSBSetup(deadline)
+        case .usb(let deviceID):
+            transition(.connecting(target), "Connecting USB accessory — open WAMC and approve access on your phone…")
+            receiver.startAccessory(deviceID: deviceID, attempt: id)
+        case .adb(let serial):
+            let setup = makeUSBSetup(ProcessInfo.processInfo.systemUptime + usbPreparationTimeout)
             let removeForward = self.removeForward
             usbSetup = setup
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -143,9 +186,11 @@ final class ConnectionController: ObservableObject {
                     switch result {
                     case .success(let prepared):
                         self.forwarded = prepared
-                        let selected = ConnectionTarget.usb(serial: prepared.serial)
+                        let selected = ConnectionTarget.adb(serial: prepared.serial)
                         let warnings = prepared.warnings.joined(separator: " ")
                         self.transition(.connecting(selected), "Connecting through USB…" + (warnings.isEmpty ? "" : " \(warnings)"))
+                        self.armTimeout(attempt: id, message: "USB is prepared, but WAMC on the phone did not respond. Open WAMC and retry.")
+                        AppLogger.connection.info("ADB preparation succeeded; waiting for phone HELLO")
                         self.receiver.start(endpoint: .hostPort(host: "127.0.0.1",
                             port: NWEndpoint.Port(rawValue: prepared.port)!), attempt: id)
                     case .failure(let error):
@@ -217,6 +262,12 @@ final class ConnectionController: ObservableObject {
         guard attempt == id, let target = state.target else { return }
         guard state.isConnected || state.isConnecting else { return }
         switch event {
+        case .accessorySelected(let topology):
+            if case .usb = target {
+                transition(.connecting(.usb(serial: topology)), "USB accessory connected — waiting for phone approval…")
+            }
+        case .transportFailed(let message):
+            fail(message)
         case .transportReady:
             // Capability exchange is safe before identity validation; Start is not.
             receiver.sendControl([("cmd", "hello"), ("codecs", "avc,hevc"), ("configV2", "1")],
@@ -228,6 +279,20 @@ final class ConnectionController: ObservableObject {
                 identityMismatch = true
                 fail("Wi-Fi phone identity mismatch — disconnected.")
                 return
+            }
+            if case .usb(let topology) = target {
+                guard let phoneID = info["id"], WamcDiscovery.isValidId(phoneID) else {
+                    fail("USB phone did not provide a valid WAMC identity. Update WAMC on Android.")
+                    return
+                }
+                if let topology {
+                    if let expected = accessoryIdentities[topology], expected != phoneID {
+                        identityMismatch = true
+                        fail("USB phone identity changed. Reopen WAMC on the Mac before using a different phone at this USB port.")
+                        return
+                    }
+                    accessoryIdentities[topology] = phoneID
+                }
             }
             let firstHello = !state.isConnected
             if firstHello {
@@ -246,9 +311,9 @@ final class ConnectionController: ObservableObject {
         }
     }
 
-    private func armTimeout(attempt id: UUID, message: String) {
+    private func armTimeout(attempt id: UUID, message: String, delay: Duration? = nil) {
         timeout?.cancel()
-        let delay = connectionTimeout
+        let delay = delay ?? connectionTimeout
         timeout = Task { [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self, self.attempt == id, self.state.isConnecting else { return }

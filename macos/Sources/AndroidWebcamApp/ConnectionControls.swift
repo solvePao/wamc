@@ -5,7 +5,22 @@ struct ConnectionControls: View {
 
     var body: some View {
         ControlSection(title: "Source", symbol: "cable.connector") {
-            sourceRow(for: .usb(serial: nil), title: "USB", subtitle: "Wired phone", symbol: "cable.connector")
+            if let phone = model.trustRequest {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Trust \(phone.displayName) and switch to its camera?")
+                        .font(.callout)
+                    HStack {
+                        Button("Trust & Switch") { model.confirmSourceTrust(phone) }
+                        Button("Cancel", action: model.cancelSourceTrust)
+                    }
+                }
+            }
+            sourceRow(for: .usb(serial: nil), title: "USB accessory", subtitle: "Approve WAMC accessory access on your phone", symbol: "cable.connector")
+
+            if model.developmentADBEnabled {
+                sourceRow(for: .adb(serial: nil), title: "ADB (development)",
+                          subtitle: "Requires Platform Tools and USB debugging", symbol: "hammer")
+            }
 
             VStack(alignment: .leading, spacing: 12) {
                 Text("PHONES ON WI-FI")
@@ -34,7 +49,7 @@ struct ConnectionControls: View {
             }
 
             ForEach(manualSources, id: \.key) { target in
-                sourceRow(for: target, title: target.label, subtitle: "Manual Wi-Fi", symbol: "wifi")
+                sourceRow(for: target, title: target.label, subtitle: "Manual network", symbol: "wifi")
             }
 
             DisclosureGroup("Manual address") {
@@ -45,7 +60,7 @@ struct ConnectionControls: View {
                         .onSubmit(model.useManualAddress)
                     Button("Use address", action: model.useManualAddress)
                         .disabled(model.manualAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Text("Use when your network blocks automatic discovery.")
+                    Text("Use when discovery is blocked, or with USB tethering if macOS provides a working network interface.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -106,6 +121,18 @@ struct AutomationPreferences: View {
         VStack(alignment: .leading, spacing: 12) {
             Toggle("Start streaming automatically", isOn: $model.startStreamingAutomatically)
                 .help("Start streaming when an available phone can connect automatically")
+            DisclosureGroup("Developer tools") {
+                Toggle("Use ADB transport", isOn: $model.developmentADBEnabled)
+                Text("Development only. Requires installed Platform Tools, USB debugging and phone authorization. Select ADB as the source to connect.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.developmentADBEnabled {
+                    Button("Set USB File Transfer", action: model.configureDeviceDefaultUsb)
+                        .disabled(model.configuringUsbMode || !model.platformToolsAvailable)
+                    if let message = model.usbModeMessage {
+                        Text(message).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
             Toggle("Launch at login", isOn: Binding(
                 get: { model.launchAtLoginEnabled }, set: model.setLaunchAtLogin))
             if model.launchAtLoginRequiresApproval {
