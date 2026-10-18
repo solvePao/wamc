@@ -72,16 +72,61 @@ class ReleaseToolTests(unittest.TestCase):
                 publish.publish(Path(temporary))
             run.assert_not_called()
 
+    def release_assets(self, directory):
+        version = load_version()['version']
+        names = [f'WAMC-{version}.apk', f'WAMC-{version}-arm64.dmg',
+                 'android-update.json', 'appcast.xml', 'SHA256SUMS']
+        for name in names:
+            (directory / name).write_text('existing')
+        return names
+
     def test_published_version_is_immutable(self):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            version = load_version()['version']
-            for name in [f'WAMC-{version}.apk', f'WAMC-{version}-arm64.dmg',
-                         'android-update.json', 'appcast.xml', 'SHA256SUMS']:
-                (directory / name).write_text('existing')
-            result = type('Result', (), {'returncode': 0, 'stdout': '{"draft":false}', 'stderr': ''})()
-            with patch.object(publish.subprocess, 'run', return_value=result) as run:
+            self.release_assets(directory)
+            release = {'tag_name': 'v' + load_version()['version'], 'draft': False, 'id': 123}
+            with patch.object(publish, 'run', return_value=json.dumps([[release]])) as run:
                 with self.assertRaisesRegex(ValueError, 'already published'):
+                    publish.publish(directory)
+                self.assertEqual(run.call_count, 1)
+
+    def test_existing_untagged_draft_is_resumed_without_duplicate_creation(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            names = self.release_assets(directory)
+            release = {'tag_name': 'v' + load_version()['version'], 'draft': True, 'id': 416589248,
+                       'assets': [{'name': name} for name in names]}
+            pages = [[{'tag_name': 'v0.0.1', 'draft': False}], [release]]
+            with patch.object(publish, 'validate_previous'), patch.object(publish, 'run',
+                    side_effect=[json.dumps(pages), '', json.dumps(release), '']) as run:
+                publish.publish(directory)
+            calls = [call.args for call in run.call_args_list]
+            self.assertEqual(calls[0], ('api', '--paginate', '--slurp',
+                f'repos/{publish.REPOSITORY}/releases?per_page=100'))
+            self.assertEqual(calls[2], ('api', f'repos/{publish.REPOSITORY}/releases/416589248'))
+            self.assertFalse(any(call[:2] == ('release', 'create') for call in calls))
+            self.assertFalse(any('/releases/tags/' in argument for call in calls for argument in call))
+            self.assertEqual(calls[-1][:2], ('release', 'edit'))
+
+    def test_missing_release_is_created_once_then_verified_by_id(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            names = self.release_assets(directory)
+            release = {'tag_name': 'v' + load_version()['version'], 'draft': True, 'id': 123,
+                       'assets': [{'name': name} for name in names]}
+            with patch.object(publish, 'validate_previous'), patch.object(publish, 'run',
+                    side_effect=['[[]]', '', json.dumps([[release]]), '', json.dumps(release), '']) as run:
+                publish.publish(directory)
+            calls = [call.args for call in run.call_args_list]
+            self.assertEqual(sum(call[:2] == ('release', 'create') for call in calls), 1)
+            self.assertEqual(calls[-2], ('api', f'repos/{publish.REPOSITORY}/releases/123'))
+
+    def test_release_lookup_failure_does_not_create_a_draft(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.release_assets(directory)
+            with patch.object(publish, 'run', side_effect=RuntimeError('GitHub unavailable')) as run:
+                with self.assertRaisesRegex(RuntimeError, 'GitHub unavailable'):
                     publish.publish(directory)
                 self.assertEqual(run.call_count, 1)
 

@@ -33,6 +33,16 @@ def validate_previous(version):
         raise ValueError('Version and build must both increase beyond the latest published release')
 
 
+def find_release(tag):
+    # GitHub's tag endpoint cannot resolve a draft before its tag exists.
+    pages = json.loads(run('api', '--paginate', '--slurp',
+                           f'repos/{REPOSITORY}/releases?per_page=100'))
+    matches = [release for page in pages for release in page if release['tag_name'] == tag]
+    if len(matches) > 1:
+        raise ValueError('Multiple releases use this tag; resolve duplicate drafts before publishing')
+    return matches[0] if matches else None
+
+
 def publish(directory):
     version = load_version()
     tag = 'v' + version['version']
@@ -41,23 +51,21 @@ def publish(directory):
     for name in expected:
         if not (directory / name).is_file():
             raise ValueError(f'Missing release asset: {name}')
-    # A missing release is the only recoverable lookup failure.
-    lookup = subprocess.run(['gh', 'api', f'repos/{REPOSITORY}/releases/tags/{tag}'],
-                            capture_output=True, text=True)
-    if lookup.returncode:
-        if '(HTTP 404)' not in lookup.stderr:
-            raise RuntimeError(lookup.stderr)
-        validate_previous(version)
+    existing = find_release(tag)
+    if existing is not None and not existing['draft']:
+        raise ValueError('This version is already published; published assets are immutable')
+    validate_previous(version)
+    if existing is None:
         run('release', 'create', tag, '--repo', REPOSITORY, '--draft', '--title', f'WAMC {version["version"]}',
             '--notes', 'Signed Android APK and notarized Apple silicon macOS DMG. Source remains private.')
-    else:
-        existing = json.loads(lookup.stdout)
-        if not existing['draft']:
-            raise ValueError('This version is already published; published assets are immutable')
-        validate_previous(version)
+        existing = find_release(tag)
+        if existing is None or not existing['draft']:
+            raise ValueError('Expected the newly created draft release')
     run('release', 'upload', tag, '--repo', REPOSITORY, '--clobber',
         *(str(directory / name) for name in expected))
-    actual = json.loads(run('api', f'repos/{REPOSITORY}/releases/tags/{tag}'))
+    actual = json.loads(run('api', f'repos/{REPOSITORY}/releases/{existing["id"]}'))
+    if not actual['draft'] or actual['tag_name'] != tag:
+        raise ValueError('Release is no longer the expected draft')
     if {asset['name'] for asset in actual['assets']} != set(expected):
         raise ValueError('Draft asset set differs from the expected paired release')
     run('release', 'edit', tag, '--repo', REPOSITORY, '--draft=false', '--latest')
