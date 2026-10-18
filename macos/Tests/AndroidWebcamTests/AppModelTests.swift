@@ -308,6 +308,85 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.stats.decodeErrors, 1, "A delayed decoder callback from an old config is ignored")
     }
 
+    func testVideoBurstAndQualityChangesKeepOnlyLatestRequestedProfile() async throws {
+        let decoder = FakeH264Decoder()
+        let sink = AppModelTestExtensionSink()
+        let transport = FakeStreamTransport()
+        let connection = ConnectionController(receiver: transport)
+        let model = AppModel(startServices: false, connection: connection, decoder: decoder,
+                             extensionBridge: ExtensionBridge(sink: sink, now: { 10 }))
+        model.previewVisible = false
+        connection.connect(to: .address("127.0.0.1", 27183), manual: true)
+        let attempt = try XCTUnwrap(transport.attempt)
+        transport.emit(.hello(["model": "Phone"]), attempt: attempt)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        model.sendStart()
+        let config = WireProtocol.ConfigV2(codec: WireProtocol.codecAVC,
+            paramSets: [Data([0x67]), Data([0x68])], width: 1920, height: 1080, fps: 30, rotation: 0)
+        transport.emit(.configV2(config), attempt: attempt)
+        transport.emit(.configV2(config), attempt: attempt)
+        for pts in 0..<122 {
+            transport.emit(.video(Data([0, 0, 1, 0x65]), Int64(pts), pts == 0), attempt: attempt)
+        }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(decoder.configuredContexts.count, 1, "Duplicate configurations must not reset decoding")
+        XCTAssertEqual(decoder.decodeCount, 122)
+        let context = try XCTUnwrap(decoder.configuredContexts.last)
+        decoder.emitFrame(try makePixelBuffer(), ptsUs: 121, context: context)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(model.feedState, .live)
+        XCTAssertEqual(model.stats.decodeErrors, 0)
+        XCTAssertFalse(model.virtualCameraSendingFrames,
+                      "Injected old frame timestamp must not claim recent delivery")
+
+        model.setQuality(.high)
+        model.setQuality(.balanced)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(model.feedState, .updating)
+        let starts = transport.sentControls.filter { $0.first?.1 == "start" }
+        XCTAssertEqual(starts.count, 2)
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: try XCTUnwrap(starts.last))["quality"], "balanced")
+        transport.emit(.configV2(config), attempt: attempt)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let updated = try XCTUnwrap(decoder.configuredContexts.last)
+        decoder.emitFrame(try makePixelBuffer(), ptsUs: 123, context: updated)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(model.feedState, .live)
+        XCTAssertEqual(model.qualityMode, .balanced)
+        connection.disconnect()
+        decoder.emitFrame(try makePixelBuffer(), ptsUs: 124, context: updated)
+        decoder.emitError(context: updated)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(model.feedState, .idle)
+        XCTAssertEqual(model.stats.decodeErrors, 0)
+    }
+
+    func testWifiAdvertisementsReachModelAndForgettingConnectedPhoneStopsSession() async throws {
+        let transport = FakeStreamTransport()
+        let connection = ConnectionController(receiver: transport)
+        let model = AppModel(startServices: false, connection: connection)
+        let advertisement = WifiAdvertisement(instanceName: "Coverage phone",
+            txt: ["id": "coverage-forget-phone", "model": "Phone", "v": "2", "port": "27183"],
+            endpoint: .hostPort(host: "127.0.0.1", port: 27183))
+        model.wifiDiscovery.apply([advertisement])
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let phone = try XCTUnwrap(model.discoveredDevices.first)
+        XCTAssertEqual(model.wifiStatusText, "Found 1 phone(s) on Wi-Fi")
+        XCTAssertEqual(model.wifiDiscovery.endpoint(for: phone), advertisement.endpoint)
+        model.trustedStore.trust(phone.id)
+        connection.connect(to: .wifi(phone), endpoint: advertisement.endpoint, manual: true)
+        let attempt = try XCTUnwrap(transport.attempt)
+        transport.emit(.hello(["model": "Phone", "id": phone.id]), attempt: attempt)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertTrue(model.connected)
+        model.forgetDevice(phone)
+        XCTAssertFalse(model.connected)
+        XCTAssertFalse(model.isTrusted(phone))
+        model.wifiDiscovery.apply([])
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertTrue(model.discoveredDevices.isEmpty)
+    }
+
     private func makePixelBuffer() throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(nil, 1920, 1080, kCVPixelFormatType_32BGRA,
@@ -336,7 +415,9 @@ private final class FakeH264Decoder: H264Decoding {
         if config.paramSets.isEmpty { onError?(context) }
     }
 
-    func decode(annexB: Data, ptsUs: Int64, isKeyframe: Bool) { decodeCount += 1 }
+    func decode(annexB: Data, ptsUs: Int64, isKeyframe: Bool) {
+        decodeCount += 1
+    }
     func invalidate() {}
 
     func emitFrame(_ pixels: CVPixelBuffer, ptsUs: Int64, context: StreamFrameContext) {

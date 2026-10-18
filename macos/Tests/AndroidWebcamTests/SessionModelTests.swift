@@ -185,3 +185,35 @@ extension SessionModelTests {
         model.stop()
     }
 }
+
+extension SessionModelTests {
+    func testStopCancelsDeferredSourceSwitchAndIgnoresStartDuringTeardown() async throws {
+        let transport = FakeStreamTransport()
+        let connection = ConnectionController(receiver: transport)
+        let model = SessionModel(connection: connection)
+        let original = ConnectionTarget.address("127.0.0.1", 27183)
+        model.select(original)
+        model.start()
+        let connected = expectation(description: "initial session connected")
+        connection.onStateChange = { state, _ in if state.isConnected { connected.fulfill() } }
+        transport.emit(.hello(["model": "Phone"]), attempt: try XCTUnwrap(transport.attempt))
+        await fulfillment(of: [connected], timeout: 1)
+        transport.completesControls = false
+        model.select(.address("127.0.0.2", 27183))
+        XCTAssertTrue(model.switching)
+        XCTAssertEqual(model.snapshot(feed: .live, sourceLabel: "Other phone").action, .cancel)
+        model.start()
+        XCTAssertTrue(model.switching, "Start during teardown must not create another attempt")
+        model.stop()
+        let stopping = model.snapshot(feed: .live, sourceLabel: "Phone")
+        XCTAssertEqual(stopping.action, .none)
+        XCTAssertFalse(stopping.enabled)
+        let disconnected = expectation(description: "teardown completes")
+        connection.onStateChange = { state, _ in if state == .disconnected { disconnected.fulfill() } }
+        for completion in transport.pendingCompletions { completion() }
+        await fulfillment(of: [disconnected], timeout: 1)
+        XCTAssertNil(transport.attempt, "Cancelled source switch must not reconnect after teardown")
+        XCTAssertFalse(model.wantsStreaming)
+        XCTAssertFalse(model.switching)
+    }
+}

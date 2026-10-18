@@ -409,3 +409,61 @@ private final class FakeCameraExtensionService: CameraExtensionServicing {
     func refreshStatus() { refreshRequests += 1 }
     func openSystemSettings() { settingsRequests += 1 }
 }
+
+extension SetupModelTests {
+    func testAuthorizedCameraAccessDoesNotRequestOrOpenSettings() {
+        let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: false)
+        let model = SetupModel(environment: environment,
+                               packageInspector: FakeSetupPackageInspector(installed: false, issue: nil))
+        model.enableCameraAccess()
+        XCTAssertEqual(environment.accessRequests, 0)
+        XCTAssertTrue(environment.privacyPanes.isEmpty)
+        model.openPrivacy("Privacy_LocalNetwork")
+        XCTAssertEqual(environment.privacyPanes, ["Privacy_LocalNetwork"])
+    }
+
+    func testSystemPackageInspectorRequiresApplicationsLocation() {
+        let inspector = SystemSetupPackageInspector()
+        XCTAssertTrue(inspector.isInstalled(bundleURL: URL(fileURLWithPath: "/Applications/WAMC.app")))
+        XCTAssertFalse(inspector.isInstalled(bundleURL: URL(fileURLWithPath: "/Volumes/WAMC/WAMC.app")))
+        XCTAssertFalse(inspector.isInstalled(bundleURL: URL(fileURLWithPath: "/tmp/WAMC.app")))
+    }
+
+    func testSetupPollingRefreshesAuthorizationAndStopsCleanly() async {
+        let environment = FakeSetupEnvironment(authorization: .authorized, sinkRegistered: false)
+        let model = SetupModel(environment: environment,
+                               packageInspector: FakeSetupPackageInspector(installed: false, issue: nil))
+        model.start()
+        defer { model.stop() }
+        environment.authorization = .denied
+        environment.registered = true
+        let refreshed = expectation(description: "polling observes changed camera state")
+        var observation: AnyCancellable?
+        observation = model.$sinkRegistered.sink { registered in
+            if registered { refreshed.fulfill() }
+        }
+        await fulfillment(of: [refreshed], timeout: 4)
+        XCTAssertEqual(model.cameraAuthorization, .denied)
+        observation?.cancel()
+        model.stop()
+        model.stop()
+    }
+}
+
+extension SetupModelTests {
+    func testSystemLauncherReportsMissingInstalledBundle() async {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wamc-missing-\(UUID().uuidString).app")
+        do {
+            try await WorkspaceApplicationLauncher().launch(missing)
+            XCTFail("A missing application must not report successful launch")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
+    }
+
+    func testSystemEnvironmentReadsAuthorizationWithoutPrompting() {
+        XCTAssertEqual(SystemSetupEnvironment().cameraAuthorization(),
+                       AVCaptureDevice.authorizationStatus(for: .video))
+    }
+}

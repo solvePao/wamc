@@ -78,3 +78,25 @@ private struct FakeCoreMediaIOPropertyReader: CoreMediaIOPropertyReading {
         return strings[object]
     }
 }
+
+extension VirtualCameraDeviceTests {
+    func testSystemDeviceInspectionHasConsistentRegistrationResult() throws {
+        // Exercise the real read-only CoreMediaIO adapter against the CI Mac.
+        // Its hardware inventory may legitimately be empty.
+        let snapshots = try CoreMediaIODeviceQuery().devices()
+        let expected = snapshots.contains {
+            $0.uid == VirtualCameraDevice.uid && $0.streamNames.contains(VirtualCameraDevice.sinkName)
+        }
+        XCTAssertEqual(VirtualCameraDevice.sinkIsRegistered(), expected)
+        XCTAssertTrue(snapshots.allSatisfy { !$0.uid.isEmpty })
+    }
+
+    func testEmptyStreamInventoryNeverRegistersSink() throws {
+        let reader = FakeCoreMediaIOPropertyReader(
+            objectIDs: [UInt32(kCMIOObjectSystemObject): [10]],
+            strings: [10: VirtualCameraDevice.uid])
+        let snapshots = try CoreMediaIODeviceQuery(reader: reader).devices()
+        XCTAssertEqual(snapshots, [CameraDeviceSnapshot(uid: VirtualCameraDevice.uid, streamNames: [])])
+        XCTAssertFalse(VirtualCameraDevice.sinkIsRegistered(using: FakeCameraDeviceQuery(devices: snapshots)))
+    }
+}

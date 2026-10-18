@@ -8,7 +8,7 @@ let package = Package(
         .library(name: "AndroidWebcamProtocol", targets: ["AndroidWebcamProtocol"]),
         .library(name: "AndroidWebcamCore", targets: ["AndroidWebcamCore"]),
         .library(name: "AndroidWebcamAppRuntime", targets: ["AndroidWebcamAppRuntime"]),
-        .executable(name: "WAMC", targets: ["WAMCEntry"]),
+        .executable(name: "WAMC", targets: ["WAMCLauncher"]),
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
@@ -19,7 +19,8 @@ let package = Package(
         .target(
             name: "CameraExtensionRuntime",
             path: "CameraExtension",
-            exclude: ["ExtensionMain.swift", "README.md", "project.yml", "CameraExtension-Info.plist", "CameraExtension.entitlements"],
+            exclude: ["README.md", "project.yml", "CameraExtension-Info.plist", "CameraExtension.entitlements"],
+            swiftSettings: [.define("WAMC_COVERAGE_TESTING")],
             linkerSettings: [
                 .linkedFramework("CoreMediaIO"),
                 .linkedFramework("CoreMedia"),
@@ -38,13 +39,19 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
             ]),
         .executableTarget(
-            name: "WAMCEntry",
+            name: "WAMCLauncher",
             dependencies: ["AndroidWebcamAppRuntime"],
-            path: "Sources/WAMCEntry",
+            path: "Entrypoints",
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
             ]),
+        .target(
+            name: "WAMCLauncherTestSupport",
+            dependencies: ["AndroidWebcamAppRuntime"],
+            path: "Tests/WAMCLauncherTestSupport",
+            swiftSettings: [.define("WAMC_COVERAGE_TESTING")]),
         .testTarget(name: "AndroidWebcamTests",
-                    dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore", "AndroidWebcamAppRuntime", "CameraExtensionRuntime"]),
+                    dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore", "AndroidWebcamAppRuntime",
+                                   "CameraExtensionRuntime", "WAMCLauncherTestSupport"]),
     ]
 )

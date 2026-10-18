@@ -94,6 +94,11 @@ final class ViewConstructionTests: XCTestCase {
             (false, nil, .notInstalled, false),
             (true, "invalid signature", .notInstalled, false),
             (true, nil, .notInstalled, false),
+            (true, nil, .requiresApproval, false),
+            (true, nil, .disabled, false),
+            (true, nil, .activating, false),
+            (true, nil, .requiresRestart, false),
+            (true, nil, .failed("Signing failed"), false),
             (true, nil, .active, false),
             (true, nil, .active, true),
         ]
@@ -144,4 +149,39 @@ private struct ViewSetupPackageInspector: SetupPackageInspecting {
     let issue: String?
     func isInstalled(bundleURL: URL) -> Bool { installed }
     func signingIssue(bundleURL: URL) -> String? { issue }
+}
+
+extension ViewConstructionTests {
+    func testSourceControlsRenderTrustedNewAndManualSources() {
+        let transport = FakeStreamTransport()
+        let connection = ConnectionController(receiver: transport)
+        let model = AppModel(startServices: false, connection: connection)
+        let trusted = DiscoveredDevice(id: "view-trusted-\(UUID().uuidString)", instanceName: "Trusted Pixel",
+                                       model: "Pixel", brand: "Google", sdk: 35, port: 27183, version: 2)
+        let fresh = DiscoveredDevice(id: "view-new-\(UUID().uuidString)", instanceName: "New Pixel",
+                                     model: "Pixel", brand: "Google", sdk: 35, port: 27183, version: 2)
+        model.discoveredDevices = [trusted, fresh]
+        model.trustedStore.trust(trusted.id)
+        defer { model.forgetDevice(trusted) }
+        let active = ConnectionTarget.address("127.0.0.1", 27183)
+        connection.connect(to: active, manual: true)
+        model.selectSource(.address("127.0.0.2", 27184))
+        model.nativeWebcams = ["Built-in camera"]
+        let host = NSHostingView(rootView: ConnectionControls(model: model))
+        XCTAssertGreaterThan(host.fittingSize.height, 0)
+        XCTAssertTrue(model.isTrusted(trusted))
+        XCTAssertFalse(model.isTrusted(fresh))
+        connection.disconnect(stopCamera: true)
+    }
+
+    func testPreviewViewHostingPreservesRendererAcrossUpdates() {
+        let renderer = PreviewRenderer()
+        let host = NSHostingView(rootView: PreviewView(renderer: renderer))
+        host.frame = NSRect(x: 0, y: 0, width: 200, height: 100)
+        host.layoutSubtreeIfNeeded()
+        host.rootView = PreviewView(renderer: renderer)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(renderer.layer.videoGravity, .resizeAspect)
+        XCTAssertGreaterThan(host.subviews.count, 0)
+    }
 }

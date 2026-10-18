@@ -15,6 +15,10 @@ REPO_DIR = MACOS_DIR.parent
 BUILD_DIR = MACOS_DIR / ".build"
 TEST_LOG = BUILD_DIR / "macos-coverage-tests.log"
 COVERAGE_JSON = BUILD_DIR / "macos-coverage.json"
+SOURCE_ALIASES = {
+    (MACOS_DIR / "Entrypoints/main.swift").resolve():
+        (MACOS_DIR / "Tests/WAMCLauncherTestSupport/WAMCRunner.swift").resolve(),
+}
 
 
 def run_tests() -> bool:
@@ -34,13 +38,8 @@ def run_tests() -> bool:
     return False
 
 
-def newest_file(pattern: str) -> Path | None:
-    matches = list(BUILD_DIR.rglob(pattern))
-    return max(matches, key=lambda item: item.stat().st_mtime) if matches else None
-
-
 def production_sources() -> set[Path]:
-    roots = (MACOS_DIR / "Sources", MACOS_DIR / "CameraExtension")
+    roots = (MACOS_DIR / "Sources", MACOS_DIR / "CameraExtension", MACOS_DIR / "Entrypoints")
     return {
         path.resolve()
         for root in roots
@@ -50,13 +49,20 @@ def production_sources() -> set[Path]:
 
 
 def read_coverage() -> dict:
-    profile = newest_file("default.profdata")
-    binary = newest_file("AndroidWebcamTests")
-    if not profile or not binary or binary.suffix == ".swiftmodule":
-        raise RuntimeError("SwiftPM coverage profile or test executable was not found")
+    build_path = subprocess.run(
+        ["xcrun", "swift", "build", "--show-bin-path"],
+        cwd=MACOS_DIR, capture_output=True, text=True, check=True,
+    )
+    bin_dir = Path(build_path.stdout.strip())
+    profiles = [path for path in bin_dir.rglob("default.profdata") if path.is_file()]
+    binaries = sorted(path for path in bin_dir.glob("*.xctest/Contents/MacOS/*") if path.is_file())
+    if not profiles or not binaries:
+        raise RuntimeError(f"SwiftPM coverage profile or test executable was not found under {bin_dir}")
+    profile = max(profiles, key=lambda path: path.stat().st_mtime)
+    objects = [argument for binary in binaries[1:] for argument in ("-object", str(binary))]
     with COVERAGE_JSON.open("w", encoding="utf-8") as output:
         result = subprocess.run(
-            ["xcrun", "llvm-cov", "export", "-format=text", f"-instr-profile={profile}", str(binary)],
+            ["xcrun", "llvm-cov", "export", "-format=text", f"-instr-profile={profile}", str(binaries[0]), *objects],
             cwd=MACOS_DIR,
             stdout=output,
             stderr=subprocess.PIPE,
@@ -78,6 +84,12 @@ def enforce_coverage(report: dict) -> bool:
             files[path.resolve()] = entry
 
     expected = production_sources()
+    # SwiftPM forbids one source path from belonging to both an executable and
+    # a test-support target. The support copy has the same launcher body and
+    # compiles with WAMC_COVERAGE_TESTING to suppress only the @main attribute.
+    for source, support_source in SOURCE_ALIASES.items():
+        if source in expected and source not in files and support_source in files:
+            files[source] = files[support_source]
     measured = expected.intersection(files)
     missing = sorted(expected - measured)
     line_counts = [
@@ -106,7 +118,7 @@ def main() -> int:
     try:
         report = read_coverage()
         return 0 if enforce_coverage(report) else 1
-    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
         print(f"Could not verify macOS line coverage: {error}", file=sys.stderr)
         return 1
 

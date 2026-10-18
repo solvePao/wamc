@@ -111,3 +111,80 @@ private final class FakeADBRunner: ADBCommandExecuting, @unchecked Sendable {
         return ""
     }
 }
+
+extension USBConnectionSetupTests {
+    func testOfflineAndUnknownStatesGiveDeviceSpecificRecovery() {
+        for (state, detail) in [("offline", "is offline"), ("recovery", "is unavailable (recovery)")] {
+            let runner = FakeADBRunner(deviceList: "PHONE \(state) usb:1-1 model:Pixel_8\n")
+            XCTAssertThrowsError(try makeSetup(runner: runner).prepare(preferredSerial: "PHONE")) {
+                XCTAssertTrue($0.localizedDescription.contains("Pixel 8 \(detail)"))
+            }
+            XCTAssertEqual(runner.calls.count, 1, "Unavailable phones must not change USB mode")
+        }
+    }
+
+    func testUsbModeTimeoutAndCancellationAbortBeforeForwarding() {
+        for error in [USBSetupError.timedOut, .cancelled] {
+            let runner = InterruptingADBRunner(devices: deviceList, error: error)
+            let setup = USBConnectionSetup(deadline: ProcessInfo.processInfo.systemUptime + 5,
+                                            adbPath: { "/fake/adb" }, commands: runner)
+            setup.cancel()
+            XCTAssertTrue(runner.cancelled)
+            XCTAssertThrowsError(try setup.prepare(preferredSerial: nil)) {
+                XCTAssertEqual($0.localizedDescription, error.localizedDescription)
+            }
+            XCTAssertEqual(runner.calls, 2)
+        }
+    }
+
+    func testCommandRunnerRejectsExpiredDeadlineAndMissingExecutable() {
+        let runner = ADBCommandRunner()
+        XCTAssertThrowsError(try runner.run("/usr/bin/true", [], deadline: 0)) {
+            XCTAssertEqual($0.localizedDescription, USBSetupError.timedOut.localizedDescription)
+        }
+        XCTAssertThrowsError(try runner.run("/missing/wamc-adb", [],
+                                            deadline: ProcessInfo.processInfo.systemUptime + 5))
+    }
+
+    func testCommandRunnerPreservesDiagnosticTextAndReportsSignal() {
+        let runner = ADBCommandRunner()
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        XCTAssertThrowsError(try runner.run("/bin/sh", ["-c", "printf 'device rejected'; exit 2"], deadline: deadline)) {
+            XCTAssertEqual($0.localizedDescription, "device rejected")
+        }
+        XCTAssertThrowsError(try runner.run("/bin/sh", ["-c", "kill -TERM $$"], deadline: deadline)) {
+            XCTAssertEqual($0.localizedDescription, "ADB was interrupted before finishing USB setup.")
+        }
+    }
+
+    func testCancellingActiveCommandStopsItWithinDeadline() async {
+        let runner = ADBCommandRunner()
+        let finished = expectation(description: "cancelled subprocess stops")
+        DispatchQueue.global().async {
+            do {
+                _ = try runner.run("/bin/sleep", ["5"], deadline: ProcessInfo.processInfo.systemUptime + 10)
+                XCTFail("Cancellation must stop the process")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, USBSetupError.cancelled.localizedDescription)
+            }
+            finished.fulfill()
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        runner.cancel()
+        await fulfillment(of: [finished], timeout: 2)
+    }
+}
+
+private final class InterruptingADBRunner: ADBCommandExecuting, @unchecked Sendable {
+    let devices: String
+    let error: USBSetupError
+    var cancelled = false
+    var calls = 0
+    init(devices: String, error: USBSetupError) { self.devices = devices; self.error = error }
+    func cancel() { cancelled = true }
+    func run(_ path: String, _ arguments: [String], deadline: TimeInterval) throws -> String {
+        calls += 1
+        if arguments.contains("devices") { return devices }
+        throw error
+    }
+}

@@ -381,6 +381,63 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertTrue(immediateCompletionRan)
     }
 
+    @MainActor
+    func testConnectionTimeoutBlocksAutomaticRetryUntilTargetDisappears() async throws {
+        let transport = FakeStreamTransport()
+        let controller = ConnectionController(receiver: transport)
+        let target = ConnectionTarget.address("127.0.0.1", 27183)
+        let timedOut = expectation(description: "Missing HELLO fails the connection deadline")
+        controller.onStateChange = { state, _ in
+            if state == .disconnected { timedOut.fulfill() }
+        }
+        controller.connect(to: target, manual: false)
+        controller.connect(to: target, manual: false)
+        let attempt = try XCTUnwrap(transport.attempt)
+        transport.emit(.hello(["model": ""]), attempt: attempt)
+        transport.emit(.hello([:]), attempt: attempt)
+        transport.emit(.video(Data([1]), 1, false), attempt: attempt)
+        transport.emit(.transportLost, attempt: attempt)
+        controller.usbWasRemoved()
+        await fulfillment(of: [timedOut], timeout: 6)
+
+        XCTAssertTrue(controller.failureMessage?.contains("within 5 seconds") == true)
+        XCTAssertFalse(controller.canAutomaticallyConnect(to: target))
+        controller.clearFailure()
+        XCTAssertNil(controller.failureMessage)
+        controller.updateAvailableTargets([target])
+        XCTAssertFalse(controller.canAutomaticallyConnect(to: target))
+        controller.updateAvailableTargets([])
+        XCTAssertTrue(controller.canAutomaticallyConnect(to: target))
+        controller.sendControl([("cmd", "start")])
+        XCTAssertTrue(transport.sentControls.isEmpty)
+    }
+
+    @MainActor
+    func testStopTimeoutCompletesAllWaitersAndRejectsNewConnectionsDuringTeardown() async throws {
+        let transport = FakeStreamTransport()
+        let controller = ConnectionController(receiver: transport)
+        let target = ConnectionTarget.address("127.0.0.1", 27183)
+        controller.connect(to: target, manual: true)
+        let attempt = try XCTUnwrap(transport.attempt)
+        transport.emit(.hello(["model": "Phone"]), attempt: attempt)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertTrue(controller.state.isConnected)
+        transport.completesControls = false
+        let first = expectation(description: "First stop waiter finishes despite missing acknowledgement")
+        let second = expectation(description: "Repeated stop waiter also finishes")
+        controller.disconnect(stopCamera: true) { first.fulfill() }
+        controller.disconnect(stopCamera: true) { second.fulfill() }
+        controller.connect(to: .address("other", 27183), manual: true)
+        transport.emit(.hello(["model": "Late phone"]), attempt: attempt)
+        await fulfillment(of: [first, second], timeout: 2)
+
+        XCTAssertEqual(controller.state, .disconnected)
+        XCTAssertEqual(transport.sentControls.filter { $0.first?.1 == "stop" }.count, 1)
+        transport.pendingCompletions.forEach { $0() }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(controller.state, .disconnected, "Late acknowledgement must not run completions twice")
+    }
+
     func testStreamReceiverDescribesHostAndBonjourEndpoints() {
         let host = NWEndpoint.hostPort(host: "192.168.1.2", port: 27183)
         let service = NWEndpoint.service(name: "WAMC Phone", type: "_wamc._tcp", domain: "local", interface: nil)
@@ -591,12 +648,15 @@ final class FakeStreamTransport: StreamTransport {
     var onEvent: ((UUID, StreamReceiver.Event) -> Void)?
     private(set) var attempt: UUID?
     private(set) var sentControls: [[(String, String)]] = []
+    var completesControls = true
+    var pendingCompletions: [() -> Void] = []
 
     func start(endpoint: NWEndpoint, attempt: UUID) { self.attempt = attempt }
     func stop() { attempt = nil }
     func sendControl(_ fields: [(String, String)], attempt: UUID, completion: (() -> Void)?) {
         sentControls.append(fields)
-        completion?()
+        if completesControls { completion?() }
+        else if let completion { pendingCompletions.append(completion) }
     }
     func emit(_ event: StreamReceiver.Event, attempt: UUID) { onEvent?(attempt, event) }
 }
