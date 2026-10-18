@@ -17,9 +17,21 @@
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>3</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/solvePao/wamc-releases/releases/latest/download/appcast.xml</string>
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>WAMCSetupVersion</key>
+    <integer>1</integer>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
@@ -28,6 +40,12 @@
     <string>WAMC needs access to cameras to discover and stream video.</string>
     <key>NSSystemExtensionUsageDescription</key>
     <string>WAMC requires a system extension to provide an Android Camera device in macOS.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_wamc._tcp</string>
+    </array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>WAMC finds your Android phone on the local Wi-Fi network automatically to use it as a camera. Camera streams stay on your local network. Update checks connect to GitHub.</string>
 </dict>
 </plist>
 

@@ -40,7 +40,13 @@ object QualitySelector {
     const val AVC = 0
     const val HEVC = 1
 
-    /** Defaults: BEST leans on VBR near transparency; HIGH doubles the old 6M clamp. */
+    /**
+     * Defaults: BEST leans on VBR near transparency; HIGH doubles the old 6M clamp.
+     *
+     * [lowLatency] is the Wi-Fi profile: same size/fps/codec, bitrate scaled
+     * to 75% (the agreed quality budget) and GOP shortened to 1 s for faster
+     * join/recovery. Explicit overrides still win over the scaled values.
+     */
     fun profileFor(
         quality: StreamQuality,
         codec: Int,
@@ -49,6 +55,7 @@ object QualitySelector {
         fps: Int,
         bitrateOverrideBps: Int? = null,
         gopOverrideSec: Int? = null,
+        lowLatency: Boolean = false,
     ): StreamProfile {
         val base = when (quality) {
             StreamQuality.BEST -> Triple(
@@ -59,12 +66,14 @@ object QualitySelector {
             StreamQuality.BALANCED -> Triple(
                 8_000_000, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR, 2)
         }
+        val scaledBitrate = if (lowLatency) base.first * 3 / 4 else base.first
+        val scaledGop = if (lowLatency) 1 else base.third
         return StreamProfile(
             codec = codec,
             width = wantW, height = wantH, fps = fps,
-            bitrateBps = bitrateOverrideBps?.takeIf { it > 0 } ?: base.first,
+            bitrateBps = bitrateOverrideBps?.takeIf { it > 0 } ?: scaledBitrate,
             bitrateMode = base.second,
-            iFrameIntervalSec = gopOverrideSec?.takeIf { it in 1..10 } ?: base.third,
+            iFrameIntervalSec = gopOverrideSec?.takeIf { it in 1..10 } ?: scaledGop,
         )
     }
 
@@ -108,10 +117,11 @@ object RotationPlanner {
 
     fun plan(quarterTurns: Int, halSupportedModes: Set<Int>?): Plan {
         val turns = quarterTurns and 3
-        if (turns == 0) return Plan(null, 0)
+        val noRotation = if (halSupportedModes?.contains(0) == true) 0 else null
+        if (turns == 0) return Plan(noRotation, 0)
         val wantMode = turns // 1->90, 2->180, 3->270 matches the HAL enum values.
         return if (halSupportedModes?.contains(wantMode) == true) Plan(wantMode, 0)
-        else Plan(null, turns)
+        else Plan(noRotation, turns)
     }
 }
 

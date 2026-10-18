@@ -7,14 +7,29 @@ let package = Package(
     products: [
         .library(name: "AndroidWebcamProtocol", targets: ["AndroidWebcamProtocol"]),
         .library(name: "AndroidWebcamCore", targets: ["AndroidWebcamCore"]),
-        .executable(name: "WAMC", targets: ["AndroidWebcamApp"]),
+        .library(name: "AndroidWebcamAppRuntime", targets: ["AndroidWebcamAppRuntime"]),
+        .executable(name: "WAMC", targets: ["WAMCEntry"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
     ],
     targets: [
         .target(name: "AndroidWebcamProtocol"),
         .target(name: "AndroidWebcamCore", dependencies: ["AndroidWebcamProtocol"]),
-        .executableTarget(
-            name: "AndroidWebcamApp",
-            dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore"],
+        .target(
+            name: "CameraExtensionRuntime",
+            path: "CameraExtension",
+            exclude: ["ExtensionMain.swift", "README.md", "project.yml", "CameraExtension-Info.plist", "CameraExtension.entitlements"],
+            linkerSettings: [
+                .linkedFramework("CoreMediaIO"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
+            ]),
+        .target(
+            name: "AndroidWebcamAppRuntime",
+            dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore",
+                           .product(name: "Sparkle", package: "Sparkle")],
+            path: "Sources/AndroidWebcamApp",
             linkerSettings: [
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreMedia"),
@@ -22,7 +37,14 @@ let package = Package(
                 .linkedFramework("CoreMediaIO"),
                 .linkedFramework("AVFoundation"),
             ]),
+        .executableTarget(
+            name: "WAMCEntry",
+            dependencies: ["AndroidWebcamAppRuntime"],
+            path: "Sources/WAMCEntry",
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
+            ]),
         .testTarget(name: "AndroidWebcamTests",
-                    dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore"]),
+                    dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore", "AndroidWebcamAppRuntime", "CameraExtensionRuntime"]),
     ]
 )

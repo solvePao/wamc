@@ -325,7 +325,29 @@ pgrep -il WAMC >/dev/null && echo "Mac Process: Running" || echo "Mac Process: S
 bash -c '[ -f "WAMC.dmg" ] && echo "Mac DMG: Present ($(ls -lh WAMC.dmg | awk '\''{print $5}'\''))" || echo "Mac DMG: Not Present"'
 ```
 
-### 6.4 Merge verification (coordinator, after both agents finish)
+### 6.4 Wi-Fi discovery + background agent checks (coordinator, manual + shell)
+
+```bash
+# Installed bundle is a menu-bar agent with Bonjour declared:
+/usr/libexec/PlistBuddy -c "Print :LSUIElement" /Applications/WAMC.app/Contents/Info.plist   # true
+/usr/libexec/PlistBuddy -c "Print :NSBonjourServices" /Applications/WAMC.app/Contents/Info.plist  # _wamc._tcp
+
+# Phone advertises (same Wi-Fi, USB unplugged): the Mac menu bar lists the
+# phone by model within ~5s; first time use Trust & Connect, then it
+# auto-connects. Plug USB in -> transport switches to USB; unplug -> Wi-Fi resumes.
+# Freeze matrix (each over USB and Wi-Fi, watching WAMC preview + FaceTime):
+# rotate phone, toggle quality/camera/enhancement/rotation, switch camera,
+# plug/unplug USB mid-stream. Expect: brief stall (<= ~1 GOP), then live
+# video with no manual Stop/Start. FaceTime must never hold a frozen frame:
+# stalls show the waiting slate, size changes stay letterboxed, and the
+# status reads "Waiting for keyframe" only while rejoining.
+# Reboot/login without touching anything: WAMC is in the menu bar, no Dock
+# icon/window, and (phone on Wi-Fi) streams to the WAMC Camera virtual camera.
+# Negative: phone on a different SSID must not auto-connect; toggling
+# Wi-Fi discovery off on the phone removes it from the Mac list.
+```
+
+### 6.5 Merge verification (coordinator, after both agents finish)
 
 ```bash
 bash -c '

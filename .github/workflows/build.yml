@@ -1,0 +1,55 @@
+name: Build
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Validate release tooling
+        run: |
+          python3 scripts/release/version.py
+          python3 -m unittest discover -s scripts/release -p 'test_*.py'
+      - name: Build and check Android
+        working-directory: android
+        run: ./gradlew --no-daemon :app:assembleDebug :app:check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-validation
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            android/app/build/reports/
+  macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Apple silicon runner
+        run: test "$(uname -m)" = arm64
+      - name: Check Mac and build release executable
+        run: |
+          python3 macos/scripts/check_macos_coverage.py
+          cd macos
+          swift build -c release
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-validation
+          include-hidden-files: true
+          path: |
+            macos/.build/macos-coverage*.log
+            macos/.build/macos-coverage.json

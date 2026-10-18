@@ -1,19 +1,19 @@
 # WAMC Architecture — Wired Android Mac Camera
 
-Turns a Samsung Android phone into a wired Mac webcam over USB (no internet,
-no audio). This file is split in two self-contained halves: **Part A (macOS)**
+Turns a Samsung Android phone into a Mac webcam over USB or the same
+Wi-Fi network (no internet, no audio). This file is split in two self-contained halves: **Part A (macOS)**
 and **Part B (Android)**. The only shared contract is the **AWC1 wire
 protocol** (`shared/protocol/PROTOCOL.md`), described once in §0.
 
 System context:
 
 ```text
-[Samsung phone: Android app] --USB--> [Mac: WAMC app] --> [WAMC Camera virtual cam]
-   Camera2 -> MediaCodec            adb forward TCP        CoreMediaIO sys-ext
-   AWC1 encode                   127.0.0.1:27183           sink + source streams
-   (ADB transport,                     |                   meeting apps read
+[Samsung phone: Android app] --USB/Wi-Fi--> [Mac: WAMC app] --> [WAMC Camera virtual cam]
+   Camera2 -> MediaCodec            adb forward / Bonjour    CoreMediaIO sys-ext
+   AWC1 encode                   127.0.0.1:27183 / _wamc._tcp  sink + source streams
+   (socket transport,                  |                   meeting apps read
     AOA behind same iface)      VideoToolbox decode        source @30fps
-                                SwiftUI preview
+                                SwiftUI preview (menu-bar agent)
 ```
 
 Test matrix: Samsung phones + owner's Mac only (verified SM-E236B, Android 14).
@@ -63,7 +63,7 @@ plus an Xcode-only system extension that SwiftPM never builds.
 ## A.1 Runtime data flow
 
 ```text
-adb forward tcp:27183 --TCP--> USBReceiver --AWC1 frames--> AppModel --annexB--> H264Decoder
+adb forward / Bonjour endpoint --TCP--> StreamReceiver --AWC1 frames--> AppModel --annexB--> H264Decoder
    (DeviceDiscovery)   (NWConnection,       (CONFIG dedup,  (VideoToolbox
     port 27183)         auto-reconnect)      stats, 60Hz     VTDecompressionSession,
                                             pump)           AVC+HEVC, Annex-B to AVCC)
@@ -84,11 +84,22 @@ adb forward tcp:27183 --TCP--> USBReceiver --AWC1 frames--> AppModel --annexB-->
 
 Key classes and behaviors:
 
-- `USBReceiver.swift` — `NWConnection` TCP client to `127.0.0.1:27183`;
-  `FrameParser.feed` to `dispatch` to `onVideo/onConfig/onConfigV2/onHello/
-  onConnectionChange`; `sendControl` for `hello/requestKeyframe/start/stop/
-  setFacing/rotate`. Reconnect via `ReconnectPolicy` (0.5s doubling, 8s cap).
-  AOA arrives on the same socket path once host-side negotiation presents it.
+- `StreamReceiver.swift` — single `NWConnection` AWC1 receiver for every
+  transport: USB (`127.0.0.1:27183` after `adb forward`) or Wi-Fi (the
+  Bonjour service endpoint from `NWBrowser`, resolved by Network.framework
+  — the app never handles an IP; a manual host:port fallback exists for
+  mDNS-blocked networks). `FrameParser.feed` to `dispatch` to
+  `onVideo/onConfig/onConfigV2/onHello/onConnectionChange`; `sendControl`
+  for `hello/requestKeyframe/start/stop/setFacing/rotate`. Reconnect via
+  `ReconnectPolicy` (0.5s doubling, 8s cap).
+- `WifiDiscovery.swift` — `NWBrowser` for `_wamc._tcp` with TXT records;
+  devices keyed by stable TXT `id` (`DiscoveredDevice.parseTXT` in Core),
+  endpoints kept for dialling. `TrustedDeviceStore` persists trusted ids
+  (UserDefaults); Wi-Fi auto-connect only for trusted ids and HELLO `id`
+  must match TXT `id` or the connection is dropped.
+- `LaunchAtLogin.swift` — `SMAppService.mainApp` wrapper: default ON on
+  first launch, persisted opt-out, real status (incl. `.requiresApproval`)
+  reflected in the UI; no-ops/fails gracefully outside `/Applications`.
 - `H264Decoder.swift` — `configure(with:)` (AVC sps/pps) and
   `configure(withV2:)` (AVC/HEVC param sets) build `CMVideoFormatDescription`
   then a real-time `VTDecompressionSession` (BGRA output). `decode(annexB:
@@ -100,15 +111,23 @@ Key classes and behaviors:
   plug watchdog. `facingBack` defaults `false` (mirrors the phone's front
   default); `autoConnect`/`autoStart` persist via `UserDefaults`, default
   ON, switched by the "Auto-connect on plug" / "Auto-start camera" toggles.
-  On connect sends `cmd=hello
+  Every dial path (`doConnectUSB`, `connectWifi`, `connectManualAddress`)
+  calls `resetStreamState()` before `receiver.start`: decoder invalidate,
+  queue clear, CONFIG-dedup reset, arrival-map clear, watchdog reset — so a
+  USB↔Wi-Fi switch rejoins like a fresh connect. On connect sends `cmd=hello
   (codecs=avc,hevc;configV2=1)` + `requestKeyframe`, then `sendStart` when
   `shouldAutoStart`; `sendStart` sends `cmd=start` with
-  quality/width/height/fps/codec-auto; CONFIG dedup by `WxH@fps:rotation`
-  string; rotation non-zero goes through `FrameRotation.rotate`, rotation 0
-  forwards untouched (fast path). The display pump wraps once via
-  `makeImageSampleBuffer` and shares the sample with renderer and bridge.
-  `pollDevices` auto-connects on arrival (`shouldConnect`) and clears the
-  Stop latch on serial swap; `sendStart`/`sendStop`/`disconnect` update the
+  quality/width/height/fps/codec-auto; CONFIG dedup by
+  `codec:WxH@fps:rotation` (`StreamConfigDesc`, both v1 and v2 paths skip
+  VT session rebuilds on duplicates); rotation non-zero goes through
+  `FrameRotation.rotate`, rotation 0 forwards untouched (fast path). The
+  display pump wraps preview and bridge samples separately and normalizes
+  bridge pixels to 1920×1080 (`normalizedBridgePixels`, letterbox; fast path
+  at native size). `KeyframeWatchdog` (`StreamRejoin.swift`) re-asks for an
+  IDR while still waiting after a CONFIG (throttled 1s, 8 attempts, 12s
+  window; "Waiting for keyframe" status from attempt 2). `pollDevices`
+  auto-connects on arrival (`shouldConnect`) and clears the Stop latch on
+  serial swap; `sendStart`/`sendStop`/`disconnect` update the
   latch (`didSendStart`/`didSendStop`/`manualDisconnect`), while a transient
   drop only resets `streamCommanded` so reconnect re-asks. Decode errors
   increment `stats.decodeErrors` and request a keyframe.
@@ -129,7 +148,15 @@ Key classes and behaviors:
 - `AndroidWebcamApp.swift` — SwiftUI `WAMCApp`: main window (connection dot,
   preview, status, diagnostics `codec - FPS - Mbps`, quality picker
   Best/1080p-high/720p-balanced, Connect/Start/Stop/switch-camera/Rotate/
-  Refresh, auto-connect/auto-start toggles, virtual-cam status) + `MenuBarExtra` with the same controls.
+  Refresh, auto-connect/auto-start toggles, virtual-cam status, Wi-Fi
+  device list with Trust & Connect, manual-address fallback, launch-at-login
+  toggle) + `MenuBarExtra` as the primary surface with full parity
+  (status/transport/device/diagnostics, quality, Start/Stop, camera
+  switch/rotate, toggles). The app is a menu-bar agent (`LSUIElement` in
+  `WAMC-Info.plist`, `NSApp` activation policy `.accessory`): no Dock icon
+  or window at login launch; the single `Window` opens on demand and
+  closing it returns to background while decode → extension bridge keeps
+  flowing (preview rendering pauses when hidden).
 - Core: `LatestFrameQueue` (cap 2, `dequeueLatest` drops all but newest),
   `StreamStats` (rolling FPS, Mbps since connect), `FrameRotation`
   (CoreImage centre-rotate + translate, swaps axes on odd turns),
@@ -146,14 +173,16 @@ extension with the same team, approve in System Settings.
   runloop.
 - `ProviderSource.swift` — provider "Android Camera Provider" + one device
   ("Android Camera", fixed UUID) with `SharedFrame` (NSLock-guarded latest
-  `CVPixelBuffer`) shared between streams.
+  `CVPixelBuffer` + store timestamp) shared between streams.
 - `DeviceSource.swift` — two streams: source "Android Camera Video" +
   sink "Android Camera Sink" (fixed UUIDs, host-time clock).
 - `StreamSources.swift` — `SourceStreamSource` publishes at 30fps
-  (`DispatchSourceTimer` 33ms): latest sink frame or cached dark
-  placeholder, so the camera never disappears mid-call on unplug;
-  `SinkStreamSource` consumes app sample buffers into `SharedFrame`
-  (queue size 30, 1 buffer for startup). Format: 1920x1080 BGRA.
+  (`DispatchSourceTimer` 33ms): the sink frame only while fresh
+  (`latestFresh(within: 1.0)`), else the cached dark placeholder, so a stall
+  reads as the waiting slate instead of a frozen frame and the camera never
+  disappears mid-call on unplug; `SinkStreamSource` consumes app sample
+  buffers into `SharedFrame` (queue size 30, 1 buffer for startup). Format:
+  fixed 1920x1080 BGRA (the app letterboxes other sizes into it).
 
 ## A.3 Build, install, verify
 
@@ -186,7 +215,7 @@ camera-type foreground service.
 | Package | Files | Role |
 |---|---|---|
 | `camera` | `CameraStreamingService.kt`, `CameraController.kt`, `VideoEncoder.kt`, `CodecConfig.kt`, `StreamProfile.kt`, `CameraInfo.kt`, `CameraOrientation.kt` | Capture + encode + quality/rotation policy + sensor/display orientation math |
-| `transport` | `Transport.kt` (`Transport` + `TransportHub`), `AdbSocketTransport.kt`, `UsbAccessoryTransport.kt`, `NativeUvcSupport.kt` | AWC1 fan-out over ADB-TCP / AOA; UVC guidance text |
+| `transport` | `Transport.kt` (`Transport` + `TransportHub`), `AdbSocketTransport.kt` (socket on :27183, serves USB-forwarded and Wi-Fi peers alike), `UsbAccessoryTransport.kt`, `Discovery.kt` (`WamcDiscovery` pure contract), `WifiDiscoveryAdvertiser.kt` (NSD/Bonjour), `NativeUvcSupport.kt` | AWC1 fan-out over socket / AOA; Wi-Fi discovery; UVC guidance text |
 | `protocol` | `protocol/WireProtocol.kt` | AWC1 framing, CONFIG/CONFIG2, CONTROL/HELLO codecs |
 | `ui` | `ui/MainActivity.kt`, `ui/SquareTextureView.kt`, `res/layout/activity_main.xml` (+land), drawables, `values/strings.xml` | Dark-theme UI, square preview, quality/camera/rotate controls |
 | `util` | `util/UsbConfigHelper.kt` | Dev-options/root USB-mode setup card prefs |
@@ -206,7 +235,8 @@ MainActivity --bind--> CameraStreamingService (foreground, notification)
                                 |-> onConfigSets -> CONFIG2 (+legacy CONFIG on AVC)
                                 |-> onFrame (Annex-B AU, key flag, pts)
                                 v
-                         TransportHub --latest-wins--> AdbSocketTransport (:27183) + UsbAccessoryTransport
+                         TransportHub --latest-wins--> AdbSocketTransport (:27183, USB+Wi-Fi) + UsbAccessoryTransport
+                         WifiDiscoveryAdvertiser --Bonjour _wamc._tcp + TXT(id,model,...)--> Mac NWBrowser
                                 ^  HELLO + CONFIG resend + requestKeyframe on peer attach
                                 |  CONTROL in: hello/start/stop/requestKeyframe/setFacing/setCamera/rotate/ping
 ```
@@ -220,18 +250,30 @@ Key classes and behaviors:
   transports; `stopStreaming` falls back to the idle notification instead of
   leaving the foreground. `currentCameraId` resolves via
   `DefaultCamera.pickId` (saved → front → main back → first).
-  `restartPipeline` order is load-bearing: `closeCapture()` before
-  `encoder.stop()` so the camera never targets a released surface (kills
-  HAL buffer-error storms). Rotation goes through `rotationSetup()`:
+  `restartPipeline` order is load-bearing: bump `streamGeneration`
+  (`StreamEpoch.kt`), `hub.flushVideo()`, `RestartGate.reset()`, then
+  `closeCapture()` before `encoder.stop()` so the camera never targets a
+  released surface (kills HAL buffer-error storms). Frames gate on the first
+  IDR (`shouldForward`) and the opening IDR is forced, so CONFIG-first +
+  IDR-first holds and stale P-frames never reach the Mac. A `requestKeyframe`
+  arriving with no encoder is coalesced (`pendingKeyframeRequest`). HELLO
+  echoes `gen=<streamGeneration>`. Rotation goes through `rotationSetup()`:
   `CameraOrientation.totalTurns` (sensor/display/facing + manual taps) fed
   to `RotationPlanner`; the HAL mode (if any) opens the camera while
-  `macRotation` travels in CONFIG(2) and `previewTurns` drives the preview.
-  Sends CONFIG2 first then legacy CONFIG on AVC (dedup by
-  sets+size+rotation+codec); `handleControl` implements negotiation:
-  `hello` restarts only if the picked codec would actually change; `start`
-  applies quality/codec/bitrate/gop/peer-codecs then `startStreaming`;
-  camera-thread exceptions are caught and surfaced as status, never process
-  death. Prefs: camera id, enhance flag, quality.
+  `StreamOrientation.streamTurns` travels in CONFIG(2), while its separate
+  `PreviewOrientation` supplies the TextureView transform and orientation label.
+  Display rotation is watched (`DisplayManager.DisplayListener`, with a trailing
+  update within 500 ms, plus activity `notifyConfigurationChanged`): metadata-only changes
+  resend CONFIG + keyframe (`RotationResendPolicy.RESEND_CONFIG`), HAL mode
+  changes restart. `setPreviewSurface(null)` only closes capture; the next
+  live surface triggers the single restart. Sends CONFIG2 first then legacy
+  CONFIG on AVC (dedup by sets+size+rotation+codec); `handleControl`
+  implements negotiation: `hello` restarts only if the picked codec would
+  actually change; `start` applies quality/codec/bitrate/gop/peer-codecs
+  then `startStreaming`; camera-thread exceptions are caught and surfaced as
+  status, never process death. Prefs: camera id, enhance flag, quality.
+  `TransportHub.flushVideo()` drops queued VIDEO but keeps
+  CONFIG/CONTROL/HELLO.
 - `CameraController.kt` — Camera2 on a dedicated `camera` HandlerThread.
   Default via `DefaultCamera.pickId` (saved → front → main back → first).
   `chooseSize` =
@@ -271,8 +313,19 @@ Key classes and behaviors:
   decodes CONTROL frames; writer thread per peer; `peerCount` drives the
   "waiting for Mac" status.
 - `AdbSocketTransport.kt` — `ServerSocket(27183)` accept loop
-  (`tcpNoDelay`), each socket attached to the hub. This is the tested
-  default path (needs USB debugging + `adb forward`).
+  (`tcpNoDelay`), each socket attached to the hub. The socket binds all
+  interfaces, so the same listener serves the USB path (`adb forward`,
+  tested default, needs USB debugging) and direct Wi-Fi peers found via
+  Bonjour — no second server.
+- `Discovery.kt` / `WifiDiscoveryAdvertiser.kt` — `WamcDiscovery` is the
+  pure, unit-tested contract (service type `_wamc._tcp.`, stable UUID
+  `id`, instance name `WAMC-<model>-<shortId>`, TXT builder/sanitizer).
+  The advertiser owns `NsdManager` registration, a Wi-Fi multicast lock,
+  and a `ConnectivityManager` Wi-Fi callback (register on available,
+  unregister on lost). Owned by `CameraStreamingService` (created in
+  `onCreate`, stopped in `onDestroy`, toggled by the Wi-Fi discovery
+  switch, default ON). HELLO now carries `id=<deviceId>`; `deviceId()`
+  persists the UUID in `wamc_prefs/device_id`.
 - `UsbAccessoryTransport.kt` — AOA bulk streams via
   `UsbManager.openAccessory` (needs host-side GET_PROTOCOL/SET_STRING/START
   first — Mac helper still pending, see `docs/ACCESSORY.md`); `start`
@@ -281,17 +334,28 @@ Key classes and behaviors:
 - `NativeUvcSupport.kt` — guidance strings only: an app cannot enable UVC
   gadget mode; on Android 14+ firmware it is a phone USB-menu option the Mac
   sees via AVFoundation with no app.
+- `DashboardLayout.kt` — measures controls and the pinned stream action before
+  sizing the square preview. Portrait stacks preview and controls; landscape
+  uses two columns. A ScrollView keeps controls reachable in small windows or
+  at enlarged font sizes; camera actions move from the preview into that
+  scroll area when the preview is too small for readable labels. Dark native resources provide teal accents and
+  at least 48dp touch targets; the Activity owns system-bar/cutout insets.
 - `MainActivity.kt` — `startForegroundService` (sticky listener survives
   the activity) + binds the service; square `SquareTextureView` preview
   (Matrix rotation is cosmetic only — the stream keeps sensor order +
-  CONFIG rotation, preview follows `previewTurns()`). Auto-start switch
+  CONFIG rotation, while `previewOrientation()` avoids applying sensor rotation
+  a second time). Auto-start switch
   (persisted `auto_start`, default ON) + `maybeAutoStart` on connect,
   permission grant, and re-enable; `startStreamingFromUi` is the shared tap
   path (spinner → BEST/HIGH/BALANCED → `startStreaming`). Start/Stop
   (camera permission gated), switch-camera, rotate, enhance toggle, camera
   spinner, USB-setup card (`UsbConfigHelper`: root `svc usb` attempt, else
   deep-links to dev options / about phone, dismissible). Reacts to
-  `USB_ACCESSORY_ATTACHED` by calling `connectAccessory`.
+  `USB_ACCESSORY_ATTACHED` by calling `connectAccessory`. Renders button,
+  camera availability, placeholder, and status from service state; snapshots
+  `currentStatus()` on rebind and updates through service callbacks. Quality
+  selection survives recreation, and manual camera-permission grants honor
+  the original Start tap even when Auto-start is disabled.
 - Manifest: CAMERA + FOREGROUND_SERVICE(_CAMERA) + POST_NOTIFICATIONS +
   INTERNET; `foregroundServiceType="camera"`; AOA intent filter + metadata
   `@xml/accessory_filter` (`manufacturer=WAMC model="Wired Android Mac
@@ -323,7 +387,7 @@ Key classes and behaviors:
   manual taps) feeds `RotationPlanner`; HAL `SCALER_ROTATE_AND_CROP` when
   the camera supports it (CONFIG rotation 0, Mac fast path), else the total
   travels in CONFIG(2) and `FrameRotation` renders it on the Mac. Measured:
-  SM-E236B test camera lacks HAL rotate-and-crop, so rotation travels as
+  SM-E236B test camera supports HAL NONE only, so rotation travels as
   metadata (`docs/QUALITY.md`).
 - Auto flow: Android sticky idle-listener service + `maybeAutoStart`
   (switchable); Mac 2.5 s plug watchdog + `AutoStartPolicy` Stop-latch;

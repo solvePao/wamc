@@ -66,6 +66,28 @@ class EnhancementModeTest {
     }
 
     @Test
+    fun lowLatencyPrefersFastOverHighQuality() {
+        val modes = intArrayOf(
+            CaptureRequest.EDGE_MODE_OFF,
+            CaptureRequest.EDGE_MODE_FAST,
+            CaptureRequest.EDGE_MODE_HIGH_QUALITY,
+        )
+        assertEquals(
+            CaptureRequest.EDGE_MODE_FAST,
+            EnhancementModes.pickEdgeMode(modes, true, lowLatency = true),
+        )
+        assertEquals(
+            CaptureRequest.NOISE_REDUCTION_MODE_FAST,
+            EnhancementModes.pickNoiseReductionMode(modes, true, lowLatency = true),
+        )
+        // USB path (lowLatency = false) still prefers HIGH_QUALITY.
+        assertEquals(
+            CaptureRequest.EDGE_MODE_HIGH_QUALITY,
+            EnhancementModes.pickEdgeMode(modes, true),
+        )
+    }
+
+    @Test
     fun fallsBackToFastWithoutHighQuality() {
         assertEquals(
             CaptureRequest.EDGE_MODE_FAST,

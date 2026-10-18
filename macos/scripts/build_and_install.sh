@@ -1,60 +1,65 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MACOS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SIGN_IDENTITY="${SIGN_IDENTITY:-Apple Development: Arush Yadav (FJ696ZCQ56)}"
+DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-HU27CJ3DK6}"
+export DEVELOPMENT_TEAM
 
-echo "==> Building Swift packages (Release)..."
-cd "$MACOS_DIR"
-xcrun swift build -c release
+mkdir -p "$MACOS_DIR/.build"
+STAGING_DIR="$(mktemp -d "$MACOS_DIR/.build/wamc-install.XXXXXX")"
+INSTALL_STAGING=""
+cleanup() {
+    if [[ -n "$INSTALL_STAGING" ]]; then
+        if [[ ! -d /Applications/WAMC.app && -d "$INSTALL_STAGING/Previous.app" ]]; then
+            mv "$INSTALL_STAGING/Previous.app" /Applications/WAMC.app
+        fi
+        rm -rf "$INSTALL_STAGING"
+    fi
+    rm -rf "$STAGING_DIR"
+}
+trap cleanup EXIT
+APP_DIR="$STAGING_DIR/WAMC.app"
+WAMC_APP_OUTPUT="$APP_DIR" bash "$SCRIPT_DIR/build_bundle.sh"
 
-APP_DIR="/Applications/WAMC.app"
-SYSEXT_DIR="$APP_DIR/Contents/Library/SystemExtensions/com.androidwebcam.app.CameraExtension.systemextension"
-
-echo "==> Quitting any running WAMC instance..."
+echo "==> Installing validated WAMC..."
+INSTALL_STAGING="$(mktemp -d /Applications/.WAMC-install.XXXXXX)"
+ditto "$APP_DIR" "$INSTALL_STAGING/WAMC.app"
 pkill -x WAMC || true
-sleep 1
-
-echo "==> Creating application structure in $APP_DIR..."
-mkdir -p "$APP_DIR/Contents/MacOS"
-mkdir -p "$APP_DIR/Contents/Resources"
-mkdir -p "$SYSEXT_DIR/Contents/MacOS"
-
-echo "==> Copying host app binary and Info.plist..."
-cp "$MACOS_DIR/.build/release/WAMC" "$APP_DIR/Contents/MacOS/WAMC"
-cp "$MACOS_DIR/WAMC-Info.plist" "$APP_DIR/Contents/Info.plist"
-
-echo "==> Compiling CameraExtension..."
-xcrun swiftc -target arm64-apple-macos14.0 -O \
-    -framework Foundation -framework CoreMediaIO -framework CoreVideo \
-    "$MACOS_DIR/CameraExtension/ExtensionMain.swift" \
-    "$MACOS_DIR/CameraExtension/ProviderSource.swift" \
-    "$MACOS_DIR/CameraExtension/DeviceSource.swift" \
-    "$MACOS_DIR/CameraExtension/StreamSources.swift" \
-    -o "$SYSEXT_DIR/Contents/MacOS/CameraExtension"
-
-cp "$MACOS_DIR/CameraExtension/CameraExtension-Info.plist" "$SYSEXT_DIR/Contents/Info.plist"
-
-SIGN_IDENTITY="Apple Development: Arush Yadav (FJ696ZCQ56)"
-
-echo "==> Signing System Extension with identity: $SIGN_IDENTITY..."
-codesign -s "$SIGN_IDENTITY" -f \
-    --entitlements "$MACOS_DIR/CameraExtension/CameraExtension.entitlements" \
-    --options runtime \
-    "$SYSEXT_DIR"
-
-echo "==> Signing Container App with identity: $SIGN_IDENTITY..."
-codesign -s "$SIGN_IDENTITY" -f \
-    --entitlements "$MACOS_DIR/WAMC.entitlements" \
-    --options runtime \
-    "$APP_DIR"
-
-echo "==> Validating signatures..."
-codesign -vvv "$SYSEXT_DIR"
-codesign -vvv "$APP_DIR"
+for ((attempt = 0; attempt < 50; attempt++)); do
+    if ! pgrep -x WAMC > /dev/null; then break; fi
+    sleep 0.1
+done
+if pgrep -x WAMC > /dev/null; then
+    echo "WAMC has not exited; the installed app has not been changed." >&2
+    exit 1
+fi
+if [[ -d /Applications/WAMC.app ]]; then
+    mv /Applications/WAMC.app "$INSTALL_STAGING/Previous.app"
+fi
+mv "$INSTALL_STAGING/WAMC.app" /Applications/WAMC.app
 
 echo "==> Launching updated WAMC..."
-open -a "$APP_DIR"
+# LaunchServices can briefly retain the exited instance (error -600).
+# Request a new instance and allow its bookkeeping to settle before retrying.
+LAUNCHED=false
+for attempt in 1 2 3; do
+    if open -n /Applications/WAMC.app; then
+        sleep 0.5
+        if pgrep -x WAMC > /dev/null; then LAUNCHED=true; break; fi
+    fi
+    sleep 1
+done
+if ! $LAUNCHED; then
+    if [[ -d "$INSTALL_STAGING/Previous.app" ]]; then
+        mv /Applications/WAMC.app "$INSTALL_STAGING/Failed.app"
+        mv "$INSTALL_STAGING/Previous.app" /Applications/WAMC.app
+        open -n /Applications/WAMC.app || true
+    fi
+    echo "Launch verification failed; the previous installation was restored when available." >&2
+    exit 1
+fi
 
 echo "==> Build and deployment completed successfully!"
 

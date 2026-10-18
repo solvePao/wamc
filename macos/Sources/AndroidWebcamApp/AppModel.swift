@@ -1,8 +1,24 @@
 import Foundation
 import CoreVideo
 import AVFoundation
+import Network
+import Combine
 import AndroidWebcamCore
 import AndroidWebcamProtocol
+
+protocol DeviceInventory: Sendable {
+    func listAndroidDevices() -> [AndroidDevice]
+    func nativeUVCWebcams() -> [String]
+    func configureDefaultUsbMode(serial: String?) -> Bool
+}
+
+struct SystemDeviceInventory: DeviceInventory {
+    func listAndroidDevices() -> [AndroidDevice] { DeviceDiscovery.listAndroidDevices() }
+    func nativeUVCWebcams() -> [String] { DeviceDiscovery.nativeUVCWebcams() }
+    func configureDefaultUsbMode(serial: String?) -> Bool {
+        DeviceDiscovery.configureDefaultUsbMode(serial: serial)
+    }
+}
 
 /// Quality tiers sent to the phone; resolution travels alongside.
 enum QualityMode: String, CaseIterable, Identifiable {
@@ -19,261 +35,496 @@ enum QualityMode: String, CaseIterable, Identifiable {
     var height: Int { self == .balanced ? 720 : 1080 }
 }
 
-/// Orchestrates discovery → adb forward → receive → decode → preview/extension.
+/// Orchestrates discovery → connect (USB via adb forward, or Wi-Fi via
+/// Bonjour) → decode → preview/extension. USB is preferred; exactly one
+/// transport is active at a time, owned by ConnectionController.
 @MainActor
 final class AppModel: ObservableObject {
     @Published var devices: [AndroidDevice] = []
     @Published var nativeWebcams: [String] = []
-    @Published var connected = false
+    let connection: ConnectionController
+    lazy var session = SessionModel(connection: connection)
+    var connected: Bool { connection.state.isConnected }
+    var connectionState: ConnectionState { connection.state }
+    @Published private(set) var feedState: FeedState = .idle
     @Published var deviceInfo: [String: String] = [:]
-    @Published var stats = StreamStats()
-    @Published var statusText = "Plug in your Samsung phone with USB to begin."
+    let diagnostics = StreamDiagnostics()
+    private(set) var stats: StreamStats {
+        get { diagnostics.stats }
+        set { diagnostics.stats = newValue }
+    }
+    /// Frames accumulate without UI notifications and flush only to the
+    /// diagnostics views at ≤1 Hz. Open controls never observe this publisher.
+    private var liveStats = StreamStats()
+    private var statsGate = PublishGate(interval: 1.0)
+    @Published var statusText = "Plug in your Samsung phone with USB, or open WAMC on the phone on the same Wi-Fi."
     /// Phone streams the front camera by default; this mirrors that.
     @Published var facingBack = false
     /// Best = HEVC/VBR ceiling when negotiated, else max-rate AVC.
-    @Published var qualityMode: QualityMode = .best
+    @Published private(set) var qualityMode: QualityMode = .best
     @Published var codecLabel = "H.264"
     @Published var rotationQuarterTurns = 0
-    /// Both default ON; persisted. Off = fully manual Connect/Start.
-    @Published var autoConnect = UserDefaults.standard.object(forKey: "wamc.autoConnect") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(autoConnect, forKey: "wamc.autoConnect") }
+    /// Wi-Fi (Bonjour) devices currently visible on the LAN.
+    @Published var discoveredDevices: [DiscoveredDevice] = []
+    @Published var wifiStatusText = "Wi-Fi discovery off"
+    /// Transport of the live (or dialling) connection, if any.
+    var activeTransport: TransportKind? { connection.state.target?.transport }
+    /// Device the Wi-Fi connection was dialled for (identity check).
+    var wifiDevice: DiscoveredDevice? {
+        if case .wifi(let device) = connection.state.target { return device }
+        return nil
     }
-    @Published var autoStart = UserDefaults.standard.object(forKey: "wamc.autoStart") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(autoStart, forKey: "wamc.autoStart") }
-    }
+    /// Set when a Wi-Fi HELLO id does not match the advertised TXT id.
+    var identityMismatch: Bool { connection.identityMismatch }
+    /// Launch-at-login mirrors (real SMAppService status, refreshed).
+    @Published var launchAtLoginEnabled = false
+    @Published var launchAtLoginRequiresApproval = false
+    /// Manual IP fallback for networks that block mDNS (window only).
+    @Published var manualAddress = ""
+    /// Preview rendering pauses when the window is hidden; the virtual
+    /// camera feed (extension bridge) keeps flowing in the background.
+    var previewVisible = true
 
     let renderer = PreviewRenderer()
-    let extensionManager = CameraExtensionManager()
-    private let receiver = USBReceiver()
-    private let decoder = H264Decoder()
+    let setup: SetupModel
+    var extensionManager: CameraExtensionManager { setup.extensionManager }
+    let wifiDiscovery = WifiDiscovery()
+    let trustedStore = TrustedDeviceStore()
+    let launchAtLogin = LaunchAtLogin()
+    private let decoder: H264Decoding
+    private let deviceInventory: DeviceInventory
     private let frameQueue = LatestFrameQueue()
-    private let extensionBridge = ExtensionBridge()
-    private var autoPolicy = AutoStartPolicy()
+    private let extensionBridge: ExtensionBridge
+    private var lastReportedBridgeAvailability: Bool?
+    private var extensionStatusObservation: AnyCancellable?
+    private var connectionObservation: AnyCancellable?
+    private var sessionObservation: AnyCancellable?
+    private let keyframeWatchdog = KeyframeWatchdog()
     private var watchdogTimer: Timer?
     private var displayTimer: Timer?
-    private let streamLock = NSLock()
-    private var lastConfigDesc: String?
+    private let frameContexts = StreamFrameContextTracker()
+    private var pollInProgress = false
+    private var lastFrameAt: TimeInterval?
+    private var phoneGeneration: String?
+    private var awaitingGeneration = false
+    private var receivedConfigV2 = false
+    private var qualityTask: Task<Void, Never>?
+    private var inFlightQuality: QualityMode?
+    private var receivedDescription = ""
+    /// Frame arrival times (host clock) keyed by phone pts, for the
+    /// arrival→decode→bridge processing metric. Bounded, oldest evicted.
+    private var arrivalByPts: [Int64: Date] = [:]
+    private var arrivalOrder: [Int64] = []
 
-    private func updateLastConfigDesc(_ desc: String) -> Bool {
-        streamLock.lock()
-        defer { streamLock.unlock() }
-        if lastConfigDesc == desc { return false }
-        lastConfigDesc = desc
-        return true
-    }
-
-    private func resetLastConfigDesc() {
-        streamLock.lock()
-        defer { streamLock.unlock() }
-        lastConfigDesc = nil
-    }
-
-    init() {
-        receiver.onConfigV2 = { [weak self] config in
+    /// Starts app-owned timers and external services when running the app.
+    /// Tests can build view state without starting Bonjour, setup polling, or ADB.
+    init(startServices: Bool = true, connection: ConnectionController? = nil,
+         decoder: H264Decoding? = nil, extensionBridge: ExtensionBridge? = nil,
+         deviceInventory: DeviceInventory = SystemDeviceInventory(),
+         setupModel: SetupModel? = nil) {
+        self.connection = connection ?? ConnectionController()
+        self.decoder = decoder ?? H264Decoder()
+        self.extensionBridge = extensionBridge ?? ExtensionBridge()
+        self.deviceInventory = deviceInventory
+        setup = setupModel ?? SetupModel()
+        let activeConnection = self.connection
+        extensionStatusObservation = setup.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        connectionObservation = activeConnection.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        session.endpointForDevice = { [weak self] phone in self?.wifiDiscovery.endpoint(for: phone) }
+        session.isTrusted = { [weak self] phone in self?.isTrusted(phone) == true }
+        session.trustDevice = { [weak self] phone in self?.trustedStore.trust(phone.id) }
+        session.onStartCamera = { [weak self] in self?.sendStart() }
+        sessionObservation = session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        activeConnection.onStateChange = { [weak self] state, message in
             guard let self else { return }
-            let desc = "\(config.width)x\(config.height)@\(config.fps):\(config.rotation)"
-            _ = self.updateLastConfigDesc(desc)
-            self.decoder.configure(withV2: config)
-            let codec = config.codec == WireProtocol.codecHEVC ? "HEVC" : "H.264"
-            Task { @MainActor in
-                self.rotationQuarterTurns = config.rotation
-                self.codecLabel = codec
-                self.statusText = "Receiving \(codec) \(config.width)×\(config.height) @ \(config.fps) FPS · \(config.rotation * 90)°"
+            self.session.connectionChanged(state)
+            if !state.isConnected {
+                self.resetStreamState()
+                self.deviceInfo = [:]
+                self.phoneGeneration = nil
+            } else {
+                let since = Date()
+                self.liveStats.connectedSince = since
+                self.stats.connectedSince = since
+            }
+            self.statusText = message
+        }
+        activeConnection.onHello = { [weak self] info, firstHello in
+            guard let self else { return }
+            let generation = info["gen"]
+            if generation != self.phoneGeneration {
+                self.resetDecoderState()
+                self.phoneGeneration = generation
+                self.awaitingGeneration = false
+                if self.feedState != .idle { self.keyframeWatchdog.noteConfig() }
+            }
+            self.deviceInfo = info
+            if firstHello {
+                self.connection.sendControl([("cmd", "requestKeyframe")])
+                self.session.connectionReady()
             }
         }
-        receiver.onConfig = { [weak self] config in
-            guard let self else { return }
-            let desc = "\(config.width)x\(config.height)@\(config.fps):\(config.rotation)"
-            guard self.updateLastConfigDesc(desc) else { return }
-            self.decoder.configure(with: config)
-            Task { @MainActor in
-                self.rotationQuarterTurns = config.rotation
-                self.codecLabel = "H.264"
-                self.statusText = "Receiving H.264 \(config.width)×\(config.height) @ \(config.fps) FPS · \(config.rotation * 90)°"
-            }
-        }
-        receiver.onVideo = { [weak self] data, pts, isKey in
-            guard let self else { return }
-            Task { @MainActor in self.stats.recordFrame(bytes: data.count, isKeyframe: isKey) }
-            self.decoder.decode(annexB: data, ptsUs: pts, isKeyframe: isKey)
-        }
-        receiver.onHello = { [weak self] info in
-            Task { @MainActor in
-                self?.deviceInfo = info
-                self?.objectWillChange.send()
-            }
-        }
-        receiver.onConnectionChange = { [weak self] isUp in
-            Task { @MainActor in
-                guard let self else { return }
-                self.connected = isUp
-                if isUp {
-                    self.stats.connectedSince = Date()
-                    self.statusText = "Connected — waiting for video…"
-                    // Capability announcement so the phone picks the best
-                    // codec itself; never starts streaming on its own.
-                    self.receiver.sendControl([
-                        ("cmd", "hello"),
-                        ("codecs", "avc,hevc"),
-                        ("configV2", "1"),
-                    ])
-                    self.receiver.sendControl([("cmd", "requestKeyframe")])
-                    if self.autoPolicy.shouldAutoStart(autoStart: self.autoStart) {
-                        self.sendStart()
-                    }
-                } else {
-                    self.stats.connectedSince = nil
-                    self.autoPolicy.didDisconnect()
-                    self.statusText = "Disconnected. Reconnecting…"
+        activeConnection.onStreamEvent = { [weak self] event in self?.receiveStreamEvent(event) }
+        self.decoder.onPixelBuffer = { [weak self] pixels, pts, context in
+            DispatchQueue.main.async {
+                guard let self, self.connected, self.frameContexts.accepts(context) else { return }
+                self.keyframeWatchdog.noteKeyframe()
+                let upright = FrameRotation.rotate(pixels, quarterTurns: context.rotation)
+                self.frameQueue.enqueue(upright, context: context)
+                if let arrived = self.arrivalByPts.removeValue(forKey: pts) {
+                    self.arrivalOrder.removeAll { $0 == pts }
+                    self.liveStats.recordProcessing(ms: Date().timeIntervalSince(arrived) * 1000)
                 }
+                self.pumpLatestFrame()
             }
         }
-        decoder.onPixelBuffer = { [weak self] pixelBuffer, _ in
-            self?.frameQueue.enqueue(pixelBuffer)
+        self.decoder.onError = { [weak self] context in
+            DispatchQueue.main.async {
+                guard let self, self.connected, self.frameContexts.accepts(context) else { return }
+                self.liveStats.decodeErrors += 1
+                self.stats.decodeErrors = self.liveStats.decodeErrors
+                self.connection.sendControl([("cmd", "requestKeyframe")])
+            }
         }
-        decoder.onError = { [weak self] in
+        wifiDiscovery.onDevicesChanged = { [weak self] found in
             Task { @MainActor in
                 guard let self else { return }
-                self.stats.decodeErrors += 1
-                self.receiver.sendControl([("cmd", "requestKeyframe")])
+                // Guarded sets: an unconditional publish here rebuilds the
+                // open menu on every Bonjour update, even if nothing changed.
+                if self.discoveredDevices != found { self.discoveredDevices = found }
+                let wifiStatus = self.wifiDiscovery.statusText
+                if self.wifiStatusText != wifiStatus { self.wifiStatusText = wifiStatus }
+                self.session.discovered(usb: self.devices, wifi: found)
             }
         }
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) {
-            [weak self] _ in
-            Task { @MainActor in
-                guard let self, let frame = self.frameQueue.dequeueLatest() else { return }
-                // Decode-only fast path: rotation already happened on-device
-                // (CONFIG rotation 0), so forward the buffer untouched.
-                let out = self.rotationQuarterTurns == 0 ? frame
-                    : FrameRotation.rotate(frame, quarterTurns: self.rotationQuarterTurns)
-                // Wrap once; preview and bridge share the same sample.
-                guard let sample = makeImageSampleBuffer(out) else { return }
-                self.renderer.enqueue(sample)
-                self.extensionBridge.send(sample)
-                self.objectWillChange.send()
+        if startServices {
+            displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) {
+                [weak self] _ in
+                Task { @MainActor in self?.pumpLatestFrame() }
             }
-        }
-        refreshDevices()
-        connect()
-        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) {
-            [weak self] _ in self?.pollDevices()
+            wifiDiscovery.start()
+            launchAtLogin.registerByDefaultIfNeeded()
+            syncLaunchAtLogin()
+            // Ask for the virtual camera now: nothing requested activation, so
+            // FaceTime never saw "Android Camera" while the badge claimed Active.
+            setup.start()
+            refreshDevices()
+            watchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) {
+                [weak self] _ in Task { @MainActor in self?.pollDevices() }
+            }
         }
     }
 
-    func refreshDevices() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let found = DeviceDiscovery.listAndroidDevices()
-            let uvc = DeviceDiscovery.nativeUVCWebcams()
-            if let first = found.first(where: { $0.state == "device" }) {
-                DeviceDiscovery.configureDefaultUsbMode(serial: first.id)
-            }
-            Task { @MainActor in
-                self?.devices = found
-                self?.nativeWebcams = uvc
-            }
+    /// Wrap the newest decoded frame once and share it with the preview
+    /// (when visible) and the extension bridge (always). Called immediately
+    /// on decode and on the 60 Hz fallback timer.
+    private func pumpLatestFrame() {
+        checkFeedFreshness()
+        maybeRequestKeyframe()
+        guard connected, let frame = frameQueue.dequeueLatestFrame(),
+              let context = frame.context, frameContexts.accepts(context) else { return }
+        let out = frame.pixels
+        lastFrameAt = ProcessInfo.processInfo.systemUptime
+        if feedState != .live {
+            feedState = .live
+            statusText = receivedDescription.isEmpty ? "Receiving video." : receivedDescription
+            let sentQuality = inFlightQuality
+            inFlightQuality = nil
+            if let sentQuality, sentQuality != qualityMode { scheduleQualityChange() }
+        }
+        if previewVisible, let sample = makeImageSampleBuffer(out) {
+            renderer.enqueue(sample)
+        }
+        // The virtual camera publishes one fixed format: normalize before
+        // bridging so a size change never wraps pixels in a wrong description.
+        let bridgePixels = normalizedBridgePixels(out)
+        guard let bridgeSample = makeImageSampleBuffer(bridgePixels) else { return }
+        extensionBridge.send(bridgeSample)
+        // Readiness changes matter to menus; individual frames and statistics
+        // do not. Publish only when the bridge becomes available/unavailable.
+        if lastReportedBridgeAvailability != extensionBridge.available {
+            lastReportedBridgeAvailability = extensionBridge.available
+            objectWillChange.send()
         }
     }
+
+    /// Re-asks for an IDR while the decoder is still waiting on one after a
+    /// CONFIG or transport start. Throttled inside the watchdog; silent on
+    /// the first attempt so a normal join shows no flicker.
+    private func maybeRequestKeyframe() {
+        guard connected, feedState != .idle else { return }
+        if keyframeWatchdog.requestDue() {
+            connection.sendControl([("cmd", "requestKeyframe")])
+            if keyframeWatchdog.attempts >= 2 {
+                let waiting = "Waiting for keyframe — requesting recovery…"
+                if statusText != waiting { statusText = waiting }
+            }
+        }
+        if keyframeWatchdog.timedOut() {
+            if feedState != .stalled { feedState = .stalled }
+            inFlightQuality = nil
+            let timeout = "Keyframe timeout — open WAMC on the phone or reconnect the camera."
+            if statusText != timeout { statusText = timeout }
+        }
+    }
+
+    // MARK: - Trust
+
+    func isTrusted(_ device: DiscoveredDevice) -> Bool {
+        trustedStore.isTrusted(device.id)
+    }
+
+    func forgetDevice(_ device: DiscoveredDevice) {
+        trustedStore.untrust(device.id)
+        if wifiDevice?.id == device.id { stopSession() }
+        objectWillChange.send()
+    }
+
+    // MARK: - Launch at login
+
+    func syncLaunchAtLogin() {
+        launchAtLogin.refresh()
+        // Guarded: this runs on the 2.5 s watchdog, and same-value sets
+        // would still publish and rebuild an open menu for no reason.
+        if launchAtLoginEnabled != launchAtLogin.isEnabled {
+            launchAtLoginEnabled = launchAtLogin.isEnabled
+        }
+        if launchAtLoginRequiresApproval != launchAtLogin.requiresApproval {
+            launchAtLoginRequiresApproval = launchAtLogin.requiresApproval
+        }
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        launchAtLogin.setEnabled(enabled)
+        syncLaunchAtLogin()
+    }
+
+    // MARK: - Discovery / watchdog
+
+    func refreshDevices() { pollDevices() }
 
     func configureDeviceDefaultUsb() {
+        let serial = devices.first(where: { $0.state == "device" })?.id
+        guard let serial else { return }
+        let inventory = deviceInventory
         DispatchQueue.global(qos: .userInitiated).async {
-            DeviceDiscovery.configureDefaultUsbMode()
+            _ = inventory.configureDefaultUsbMode(serial: serial)
         }
     }
 
-    /// Plug watchdog: runs forever, cheap (`adb devices` ~2.5 s).
-    /// Never touches USB mode here — that stays a manual/explicit action.
+    /// Automatic selection prefers USB. A manual selection owns its transport
+    /// until it is disconnected or fails, even while a cable is attached.
     private func pollDevices() {
+        syncLaunchAtLogin()
+        let wifiStatus = wifiDiscovery.statusText
+        if wifiStatusText != wifiStatus { wifiStatusText = wifiStatus }
+        guard !pollInProgress else { return }
+        pollInProgress = true
+        let inventory = deviceInventory
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let found = DeviceDiscovery.listAndroidDevices()
-            let uvc = DeviceDiscovery.nativeUVCWebcams()
-            Task { @MainActor in
+            let found = inventory.listAndroidDevices()
+            let uvc = inventory.nativeUVCWebcams()
+            DispatchQueue.main.async {
                 guard let self else { return }
-                self.devices = found
-                self.nativeWebcams = uvc
-                let currentId = found.first(where: { $0.state == "device" })?.id
-                self.autoPolicy.deviceListChanged(currentId: currentId)
-                if self.autoPolicy.shouldConnect(devicePresent: currentId != nil,
-                                                 connected: self.connected,
-                                                 autoConnect: self.autoConnect) {
-                    self.doConnect()
+                self.pollInProgress = false
+                if self.devices != found { self.devices = found }
+                if self.nativeWebcams != uvc { self.nativeWebcams = uvc }
+                self.connection.updateAvailableTargets(
+                    found.map { .usb(serial: $0.id) } + self.discoveredDevices.map { .wifi($0) })
+                if case .connected(.usb(let serial)) = self.connectionState,
+                   !found.contains(where: { $0.id == serial && $0.state == "device" }) {
+                    self.connection.usbWasRemoved()
                 }
-                self.objectWillChange.send()
+                self.session.discovered(usb: found, wifi: self.discoveredDevices)
             }
         }
     }
 
-    /// Manual Connect button: clears the Stop latch, then connects.
-    func connect() {
-        autoPolicy.manualConnect()
-        doConnect()
-    }
-
-    private func doConnect() {
-        DeviceDiscovery.configureDefaultUsbMode()
-        DeviceDiscovery.forwardPort()
-        receiver.start()
-        statusText = "Connecting through USB…"
-    }
-
-    func disconnect() {
-        autoPolicy.manualDisconnect()
-        receiver.stop()
-        DeviceDiscovery.removeForward()
+    private func resetDecoderState() {
+        frameContexts.resetConfiguration()
         decoder.invalidate()
         frameQueue.clear()
-        resetLastConfigDesc()
-        connected = false
-        statusText = "Disconnected."
+        receivedConfigV2 = false
+        arrivalByPts.removeAll()
+        arrivalOrder.removeAll()
+        keyframeWatchdog.reset()
+        lastFrameAt = nil
+        renderer.clear()
+        if feedState == .live { feedState = .starting }
     }
+
+    /// Invalidates retained pixels and delayed decoder callbacks on every teardown.
+    private func resetStreamState() {
+        frameContexts.advanceConnection()
+        resetDecoderState()
+        qualityTask?.cancel()
+        qualityTask = nil
+        inFlightQuality = nil
+        awaitingGeneration = false
+        receivedDescription = ""
+        liveStats = StreamStats()
+        stats = StreamStats()
+        feedState = .idle
+    }
+
+    var canStartCamera: Bool { connected && (feedState == .idle || feedState == .stalled) }
 
     func sendStart() {
-        autoPolicy.didSendStart()
-        codecLabel = "H.264" // replaced by CONFIG once the stream describes itself
-        resetLastConfigDesc()
-        receiver.sendControl([
-            ("cmd", "start"),
-            ("width", "\(qualityMode.width)"),
-            ("height", "\(qualityMode.height)"),
-            ("fps", "30"),
-            ("quality", qualityMode.rawValue),
-            ("codec", "auto"),
-            ("codecs", "avc,hevc"),
-            ("configV2", "1"),
-        ])
+        guard canStartCamera else { return }
+        startStream(updatingQuality: false)
     }
 
-    func sendStop() {
-        autoPolicy.didSendStop()
-        receiver.sendControl([("cmd", "stop")])
+    func setQuality(_ mode: QualityMode) {
+        guard mode != qualityMode else { return }
+        qualityMode = mode
+        if feedState != .idle {
+            scheduleQualityChange()
+        }
+    }
+
+    private func scheduleQualityChange() {
+        qualityTask?.cancel()
+        qualityTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self, self.connected, self.inFlightQuality == nil else { return }
+            self.startStream(updatingQuality: true)
+        }
+    }
+
+    private func startStream(updatingQuality: Bool) {
+        guard connected else { return }
+        resetDecoderState()
+        awaitingGeneration = phoneGeneration != nil
+        inFlightQuality = qualityMode
+        liveStats = StreamStats()
+        liveStats.connectedSince = Date()
+        stats = liveStats
+        feedState = updatingQuality ? .updating : .starting
+        statusText = updatingQuality ? "Applying quality…" : "Starting camera…"
+        keyframeWatchdog.noteConfig()
+        connection.sendControl(StreamCommand.start(quality: qualityMode, transport: activeTransport))
     }
 
     func switchCamera() {
+        guard connected else { return }
         facingBack.toggle()
-        receiver.sendControl([("cmd", "setFacing"), ("facing", facingBack ? "back" : "front")])
+        connection.sendControl([("cmd", "setFacing"), ("facing", facingBack ? "back" : "front")])
     }
 
-    /// Asks the phone to rotate; it echoes back in CONFIG and both sides turn.
     func rotate() {
-        receiver.sendControl([("cmd", "rotate")])
+        guard connected else { return }
+        connection.sendControl([("cmd", "rotate")])
     }
+
+    private func checkFeedFreshness() {
+        guard feedState == .live, let lastFrameAt,
+              ProcessInfo.processInfo.systemUptime - lastFrameAt >= 1 else { return }
+        feedState = .stalled
+        renderer.clear()
+        statusText = "No feed — check the phone or stop and start the stream."
+    }
+
+    private func receiveStreamEvent(_ event: StreamReceiver.Event) {
+        guard connected, !awaitingGeneration else { return }
+        switch event {
+        case .configV2(let config):
+            receivedConfigV2 = true
+            configureStream(codec: config.codec, sets: config.paramSets, width: config.width,
+                            height: config.height, fps: config.fps, rotation: config.rotation) {
+                decoder.configure(withV2: config, context: $0)
+            }
+        case .config(let config):
+            guard !receivedConfigV2 else { return }
+            configureStream(codec: 0, sets: [config.sps, config.pps], width: config.width,
+                            height: config.height, fps: config.fps, rotation: config.rotation) {
+                decoder.configure(with: config, context: $0)
+            }
+        case .video(let data, let pts, let isKey):
+            liveStats.recordFrame(bytes: data.count, isKeyframe: isKey)
+            if statsGate.shouldFire() { stats = liveStats }
+            arrivalByPts[pts] = Date()
+            arrivalOrder.append(pts)
+            if arrivalOrder.count > 120 {
+                let stale = arrivalOrder.removeFirst()
+                arrivalByPts.removeValue(forKey: stale)
+            }
+            decoder.decode(annexB: data, ptsUs: pts, isKeyframe: isKey)
+        default: break
+        }
+    }
+
+    private func configureStream(codec: Int, sets: [Data], width: Int, height: Int,
+                                 fps: Int, rotation: Int, apply: (StreamFrameContext) -> Void) {
+        let desc = StreamConfigDesc.describe(codec: codec, width: width, height: height, fps: fps, rotation: rotation)
+        let parameters = sets.map { $0.base64EncodedString() }.joined(separator: ":")
+        guard let context = frameContexts.configure(key: desc + ":" + parameters, rotation: rotation) else { return }
+        frameQueue.clear()
+        keyframeWatchdog.noteConfig()
+        apply(context)
+        rotationQuarterTurns = rotation
+        codecLabel = codec == WireProtocol.codecHEVC ? "HEVC" : "H.264"
+        receivedDescription = "Receiving \(codecLabel) \(width)×\(height) @ \(fps) FPS · \(rotation * 90)°"
+        if feedState == .live { statusText = receivedDescription }
+    }
+
+    // MARK: - Labels
 
     var deviceLabel: String {
         if let model = deviceInfo["model"] { return model }
+        if let wifiDevice { return wifiDevice.displayName }
         return devices.first?.model ?? "No phone detected"
     }
 
+    var transportLabel: String {
+        switch activeTransport {
+        case .usb: return "USB"
+        case .wifi: return "Wi-Fi"
+        case nil: return "—"
+        }
+    }
+
     var diagnosticsText: String {
-        String(format: "%@ · %.0f FPS · %.1f Mbps", codecLabel, stats.fps, stats.bitrateMbps)
+        var text = String(format: "%@ · %.0f FPS · %.1f Mbps",
+                          codecLabel, stats.fps, stats.bitrateMbps)
+        if stats.processingSampleCount > 0 {
+            text += String(format: " · proc p95 %.0f ms", stats.processingP95Ms)
+        }
+        if activeTransport == .wifi {
+            text += " · Wi-Fi low-latency"
+        }
+        return text
+    }
+
+    var menuStatusText: String {
+        if connectionState.isConnecting { return "Connecting — \(connectionState.target?.label ?? "phone")" }
+        if connected { return "Connected — \(deviceLabel) (\(transportLabel))" }
+        if identityMismatch { return "Identity mismatch — see window" }
+        if !discoveredDevices.isEmpty {
+            return "\(discoveredDevices.count) phone(s) on Wi-Fi — not connected"
+        }
+        return "Not connected"
+    }
+
+    var hasUntrustedDevice: Bool {
+        discoveredDevices.contains { !isTrusted($0) }
     }
 
     var virtualCameraActive: Bool {
-        extensionBridge.available
+        extensionManager.status == .active && setup.sinkRegistered && extensionBridge.available
+    }
+    var virtualCameraSendingFrames: Bool {
+        guard let lastSent = extensionBridge.lastEnqueuedAt else { return false }
+        return ProcessInfo.processInfo.systemUptime - lastSent < 1.0
     }
 
     var virtualCameraStatusText: String {
-        if extensionBridge.available {
+        if virtualCameraActive {
             return "Virtual Camera: Active (\(extensionBridge.connectedStreamName ?? "Connected"))"
         }
-        return "Virtual Camera: Enable in System Settings > Camera Extensions"
+        return extensionManager.status.description
     }
 }

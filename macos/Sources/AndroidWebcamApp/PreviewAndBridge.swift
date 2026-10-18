@@ -1,3 +1,5 @@
+import AndroidWebcamCore
+import CoreImage
 import Foundation
 import SwiftUI
 import AVFoundation
@@ -32,11 +34,46 @@ final class PreviewRenderer {
         layer.backgroundColor = CGColor(gray: 0.08, alpha: 1)
     }
 
+    func clear() { layer.flushAndRemoveImage() }
+
     func enqueue(_ sample: CMSampleBuffer) {
         if layer.status == .failed { layer.flush() }
         guard layer.isReadyForMoreMediaData else { return }
         layer.enqueue(sample)
     }
+}
+
+private let bridgeRenderContext = CIContext(options: [.useSoftwareRenderer: false])
+
+/// Normalizes a decoded frame to the fixed virtual-camera format.
+/// Pass-through at 1920×1080; anything else is aspect-fit letterboxed so the
+/// sink always receives the size its format description promises.
+func normalizedBridgePixels(_ pixelBuffer: CVPixelBuffer) -> CVPixelBuffer {
+    let srcW = CVPixelBufferGetWidth(pixelBuffer)
+    let srcH = CVPixelBufferGetHeight(pixelBuffer)
+    guard BridgeFormat.needsNormalization(srcWidth: srcW, srcHeight: srcH)
+            || CVPixelBufferGetIOSurface(pixelBuffer) == nil else {
+        return pixelBuffer
+    }
+    var dst: CVPixelBuffer?
+    guard CVPixelBufferCreate(nil, BridgeFormat.width, BridgeFormat.height,
+                              kCVPixelFormatType_32BGRA,
+                              [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+                              &dst) == kCVReturnSuccess,
+          let dst else { return pixelBuffer }
+    CVPixelBufferLockBaseAddress(dst, [])
+    defer { CVPixelBufferUnlockBaseAddress(dst, []) }
+    if let base = CVPixelBufferGetBaseAddress(dst) {
+        memset(base, 24, CVPixelBufferGetDataSize(dst))
+    }
+    let rect = BridgeFormat.fitRect(srcWidth: srcW, srcHeight: srcH)
+    guard rect != .zero else { return dst }
+    let scale = rect.width / CGFloat(srcW)
+    let image = CIImage(cvPixelBuffer: pixelBuffer)
+        .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        .transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
+    bridgeRenderContext.render(image, to: dst)
+    return dst
 }
 
 struct PreviewView: NSViewRepresentable {
@@ -50,21 +87,91 @@ struct PreviewView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSView, context: Context) {}
+
+    static func dismantleNSView(_ view: NSView, coordinator: ()) {
+        // A disconnected or closed preview must not retain the previous feed.
+        // The virtual-camera bridge owns its own samples and keeps running.
+        (view.layer as? AVSampleBufferDisplayLayer)?.flushAndRemoveImage()
+    }
+}
+
+enum ExtensionSinkEnqueueResult {
+    case accepted
+    case full
+    case unavailable
+    case failed
+}
+
+protocol ExtensionFrameSink: AnyObject {
+    var available: Bool { get }
+    var connectedStreamName: String? { get }
+    func discover()
+    func enqueue(_ sample: CMSampleBuffer) -> ExtensionSinkEnqueueResult
+    func disconnect()
 }
 
 /// Forwards frames to the virtual camera extension's sink stream (Phase 2).
 /// No-ops gracefully until the extension is installed and approved.
 final class ExtensionBridge {
-    private var bufferQueue: CMSimpleQueue?
-    private(set) var available = false
-
+    private let sink: ExtensionFrameSink
+    private let now: () -> TimeInterval
+    private var fullQueueSince: TimeInterval?
     private var lastDiscoveryAttempt: TimeInterval = 0
+    private(set) var lastEnqueuedAt: TimeInterval?
 
-    init() { discoverSink() }
+    var available: Bool { sink.available }
+    var connectedStreamName: String? { sink.connectedStreamName }
 
-    private(set) var connectedStreamName: String?
+    init(sink: ExtensionFrameSink = CoreMediaIOExtensionSink(),
+         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.sink = sink
+        self.now = now
+        sink.discover()
+    }
+
+    deinit { sink.disconnect() }
 
     func discoverSink() {
+        sink.discover()
+    }
+
+    func send(_ sample: CMSampleBuffer) {
+        let timestamp = now()
+        if !sink.available, timestamp - lastDiscoveryAttempt > 2.0 {
+            lastDiscoveryAttempt = timestamp
+            sink.discover()
+        }
+        guard sink.available else { return }
+        switch sink.enqueue(sample) {
+        case .accepted:
+            fullQueueSince = nil
+            lastEnqueuedAt = timestamp
+        case .full:
+            if let since = fullQueueSince, timestamp - since > 1.0 {
+                sink.disconnect()
+                fullQueueSince = nil
+                lastEnqueuedAt = nil
+                lastDiscoveryAttempt = 0
+            } else if fullQueueSince == nil {
+                fullQueueSince = timestamp
+            }
+        case .unavailable:
+            break
+        case .failed:
+            break
+        }
+    }
+}
+
+/// CoreMediaIO owns the system stream and queue; the bridge owns retry policy.
+private final class CoreMediaIOExtensionSink: ExtensionFrameSink {
+    private var bufferQueue: CMSimpleQueue?
+    private var sinkDevice: CMIOObjectID?
+    private var sinkStream: CMIOStreamID?
+    private(set) var available = false
+    private(set) var connectedStreamName: String?
+
+    func discover() {
         // Enumerate CMIO devices -> streams; only sink streams hand out a
         // buffer queue via CMIOStreamCopyBufferQueue, so success = found.
         var address = CMIOObjectPropertyAddress(
@@ -92,14 +199,21 @@ final class ExtensionBridge {
             guard CMIOObjectGetPropertyData(device, &streamAddress, 0, nil, streamSize,
                                             &streamSize, &streams) == noErr else { continue }
             for stream in streams {
+                // Only our own extension's sink may take the feed. Another
+                // virtual camera's sink (e.g. OBS) also matches "sink" and
+                // would steal every frame, leaving FaceTime on the slate.
                 guard let name = streamName(stream),
-                      name.localizedCaseInsensitiveContains("sink") else { continue }
+                      name.localizedCaseInsensitiveContains("sink"),
+                      name.localizedCaseInsensitiveContains("Android Camera") else { continue }
                 let queueAlteredProc: CMIODeviceStreamQueueAlteredProc = { (_, _, _) in }
-                _ = CMIODeviceStartStream(device, stream)
                 var unmanaged: Unmanaged<CMSimpleQueue>?
                 if CMIOStreamCopyBufferQueue(CMIOStreamID(stream), queueAlteredProc, nil, &unmanaged) == noErr,
                    let unmanaged {
-                    bufferQueue = unmanaged.takeRetainedValue()
+                    let queue = unmanaged.takeRetainedValue()
+                    guard CMIODeviceStartStream(device, stream) == noErr else { continue }
+                    bufferQueue = queue
+                    sinkDevice = device
+                    sinkStream = stream
                     available = true
                     connectedStreamName = name
                     return
@@ -124,18 +238,28 @@ final class ExtensionBridge {
         return value.takeRetainedValue() as String
     }
 
-    func send(_ sample: CMSampleBuffer) {
-        if !available || bufferQueue == nil {
-            let now = ProcessInfo.processInfo.systemUptime
-            if now - lastDiscoveryAttempt > 2.0 {
-                lastDiscoveryAttempt = now
-                discoverSink()
-            }
+    func enqueue(_ sample: CMSampleBuffer) -> ExtensionSinkEnqueueResult {
+        guard available, let bufferQueue else { return .unavailable }
+        guard CMSimpleQueueGetCount(bufferQueue) < CMSimpleQueueGetCapacity(bufferQueue) else {
+            return .full
         }
-        guard available, let bufferQueue else { return }
-        if CMSimpleQueueGetCount(bufferQueue) < CMSimpleQueueGetCapacity(bufferQueue) {
-            CMSimpleQueueEnqueue(bufferQueue, element: Unmanaged.passRetained(sample).toOpaque())
+        let retained = Unmanaged.passRetained(sample)
+        if CMSimpleQueueEnqueue(bufferQueue, element: retained.toOpaque()) != noErr {
+            retained.release()
+            return .failed
         }
+        return .accepted
+    }
+
+    func disconnect() {
+        if let sinkDevice, let sinkStream {
+            _ = CMIODeviceStopStream(sinkDevice, sinkStream)
+        }
+        bufferQueue = nil
+        sinkDevice = nil
+        sinkStream = nil
+        available = false
+        connectedStreamName = nil
     }
 }
 
@@ -144,7 +268,8 @@ enum PlaceholderFrame {
     static func make(width: Int = 1920, height: Int = 1080) -> CVPixelBuffer? {
         var buffer: CVPixelBuffer?
         guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA,
-                                  nil, &buffer) == kCVReturnSuccess,
+                                  [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+                                  &buffer) == kCVReturnSuccess,
               let buffer else { return nil }
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }

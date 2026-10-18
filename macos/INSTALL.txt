@@ -1,0 +1,30 @@
+WAMC — Android phone camera for Mac
+
+1. Drag WAMC.app to Applications and open that copy. If opened from this
+   disk image, use Install & Relaunch in the setup panel instead.
+2. WAMC automatically requests activation of its camera extension. In
+   System Settings > General > Login Items & Extensions > Camera Extensions,
+   enable WAMC > Android Camera. Approve any macOS authentication prompt.
+3. Use Enable Recommended Defaults to turn on automatic connection,
+   camera startup, and launch at login. Allow camera and Local Network
+   access when asked. Existing preferences are otherwise preserved.
+4. Open WAMC on Android and allow its camera. For USB, use a data cable,
+   enable USB debugging on Android, and approve this Mac on the phone.
+   USB needs Android Platform Tools (adb); the setup panel checks for it.
+   For Wi-Fi, use the same network and choose Trust & Connect for the phone.
+5. Select Android Camera in FaceTime > Video or Photo Booth > Camera.
+   The OBS logo means OBS Virtual Camera is selected. OBS can coexist.
+
+Open Setup & Diagnostics from the WAMC menu-bar menu any time. It checks
+installation, signing, extension approval, and virtual-camera registration.
+“Sending phone video” is a host delivery check. Confirm moving video in
+your meeting app as the final test. A host preview alone is insufficient.
+
+macOS requires user approval of privacy permissions and camera extensions.
+WAMC cannot silently change these switches or select a camera in other apps.
+
+This is a locally signed Apple Development build for Macs registered in
+its provisioning profile, not a notarized public-distribution release.
+The profile and signing certificate expire; rebuild with renewed signing
+assets when needed. Never disable SIP, Gatekeeper, or camera privacy to
+work around a signing error.

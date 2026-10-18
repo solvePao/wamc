@@ -1,9 +1,9 @@
 package com.androidwebcam.app.camera
 
 /**
- * Sensor/display orientation math. The encoder and preview surfaces receive
- * sensor-order buffers, so the stream needs rotating by [totalTurns] for an
- * upright picture; the manual Rotate taps add on top. No Android APIs here,
+ * Sensor/display orientation math. Encoder buffers need rotating by
+ * [totalTurns] for an upright picture; TextureView already compensates for
+ * sensor orientation and uses its own residual transform; the manual Rotate taps add on top. No Android APIs here,
  * so unit tests cover the whole table.
  *
  * Uses the documented Camera orientation rule:
