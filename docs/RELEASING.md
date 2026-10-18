@@ -1,6 +1,6 @@
 # GitHub release setup
 
-WAMC distributes directly through `solvePao/wamc-releases`. Source is hosted in `solvePao/wamc`. The repository is public so GitHub branch protection is available on the current plan. No App Store or Play Store submission occurs.
+WAMC distributes through `solvePao/wamc-releases` and mirrors the same APK, DMG, and metadata to the source repository’s Releases page. Apps continue checking `wamc-releases` for updates. Source is hosted in `solvePao/wamc`. The repository is public so GitHub branch protection is available on the current plan. No App Store or Play Store submission occurs.
 
 ## Apple credentials
 
@@ -56,7 +56,7 @@ The final command prompts for the password without placing it in command history
 2. Run Build CI and review both platform checks. Android and Mac retain 90% production line coverage gates.
 3. Commit the validated version, tag it `v0.2.0` (matching the version file), and push that tag to the source repository.
 4. Release CI signs the APK, signs and notarizes the Mac app and DMG, and signs the DMG for Sparkle.
-5. After both builds succeed, publication creates a draft in the public binary repository, uploads paired artifacts and update metadata, verifies its asset set, then publishes it.
+5. After both builds succeed, publication creates a draft in the public binary repository, uploads paired artifacts and update metadata, verifies its asset set, then publishes it. A separate job copies the verified assets into a release on `solvePao/wamc`, using that repository’s built-in Actions token. If mirroring fails, rerun the failed mirror job.
 
 Failed builds publish nothing. A retry can resume an unpublished draft. Published versions are immutable; fix and increase the version/build rather than overwriting them. Update metadata is attached to the same release as the binaries. Avoid publishing an incomplete release manually: both apps follow the latest stable release.
 
