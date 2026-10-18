@@ -1,0 +1,58 @@
+name: Product website
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require paired public downloads
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Authenticate metadata requests to avoid the anonymous API rate limit.
+          if ! gh api repos/solvePao/wamc-releases/releases/latest \
+            > "$RUNNER_TEMP/wamc-release.json"; then
+            echo '::error::Publication waits for a public stable WAMC release.'
+            exit 1
+          fi
+          if ! jq -e '
+            .draft == false and .prerelease == false and
+            any(.assets[]; (.name | test("\\.apk$")) and .size > 0) and
+            any(.assets[]; (.name | test("-arm64\\.dmg$")) and .size > 0)
+          ' "$RUNNER_TEMP/wamc-release.json" > /dev/null; then
+            echo '::error::Publication requires both an APK and an Apple silicon DMG in the latest public stable release.'
+            exit 1
+          fi
+          # Check actual download access without sending any credentials.
+          while IFS= read -r asset_url; do
+            curl --fail --silent --show-error --head --location --retry 3 \
+              "$asset_url" > /dev/null
+          done < <(jq -r ' .assets[] | select(.name | test("(\\.apk|-arm64\\.dmg)$")) | .browser_download_url' \
+            "$RUNNER_TEMP/wamc-release.json")
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: website
+      - name: Deploy product website
+        id: deployment
+        uses: actions/deploy-pages@v4
