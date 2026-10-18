@@ -2,18 +2,53 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+  workflow_run:
+    workflows: [Build]
+    branches: [main]
+    types: [completed]
 permissions:
   contents: read
 concurrency:
   group: wamc-public-release
   cancel-in-progress: false
 jobs:
+  prepare:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      # Tags created with github.token do not trigger another tag-push workflow.
+      # The remaining jobs build this exact validated commit in the same run.
+      - name: Prepare unpublished version and source tag
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release/prepare.py
   android:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -30,7 +65,7 @@ jobs:
       - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: Validate version
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           python3 scripts/release/version.py --tag "$RELEASE_TAG"
       - name: Decode permanent Android key
@@ -75,6 +110,8 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/wamc-release.jks"
   macos:
+    needs: prepare
+    if: needs.prepare.outputs.release == 'true'
     runs-on: macos-26
     timeout-minutes: 45
     environment: release
@@ -85,12 +122,14 @@ jobs:
       SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Validate version and architecture
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           test "$(uname -m)" = arm64
           python3 scripts/release/version.py --tag "$RELEASE_TAG"
@@ -136,11 +175,13 @@ jobs:
           if [[ -n "${WAMC_SIGNING_KEYCHAIN:-}" ]]; then security delete-keychain "$WAMC_SIGNING_KEYCHAIN"; fi
           rm -rf "$RUNNER_TEMP/wamc-signing"
   publish:
-    needs: [android, macos]
+    needs: [prepare, android, macos]
     runs-on: ubuntu-latest
     environment: release
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
       - uses: actions/download-artifact@v5
         with:
           pattern: signed-*
@@ -156,16 +197,18 @@ jobs:
 
   mirror:
     name: Publish source repository downloads
-    needs: publish
+    needs: [prepare, publish]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
       - name: Mirror verified release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           mkdir -p release-dist
           gh release download "$RELEASE_TAG" --repo solvePao/wamc-releases --dir release-dist

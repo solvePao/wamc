@@ -54,13 +54,13 @@ The final command prompts for the password without placing it in command history
 
 1. Update `release.json`: increase both `version` and `build`. Initial updater release is `0.2.0`, build `4`.
 2. Run `python3 scripts/testing/run_tests.py` locally and resolve any test or coverage failures. Both app gates require exact 100% production line coverage. Then run Build CI and review both platform builds; GitHub Actions does not execute tests.
-3. Commit the validated version, tag it `v0.2.0` (matching the version file), and push that tag to the source repository.
+3. Merge the version/build change into `main`. Once the Build workflow succeeds, Release automatically prepares the matching `v<version>` tag at that exact commit and packages the unpublished version. An already published version is skipped. Release also supports manual dispatch and explicitly pushed matching version tags.
 4. Release CI signs the APK, signs and notarizes the Mac app and DMG, and signs the DMG for Sparkle.
 5. After both builds succeed, publication creates a draft in the public binary repository, uploads paired artifacts and update metadata, verifies its asset set, then publishes it. A separate job copies the verified assets into a release on `solvePao/wamc`, using that repository’s built-in Actions token. If mirroring fails, rerun the failed mirror job.
 
 Failed builds publish nothing. A retry can resume an unpublished draft. Published versions are immutable; fix and increase the version/build rather than overwriting them. Update metadata is attached to the same release as the binaries. Avoid publishing an incomplete release manually: both apps follow the latest stable release.
 
-For failures, inspect jobs/logs with GitHub MCP, fix the source, and rerun. Build workflow supports manual dispatch for validation. The release workflow runs only from matching version tags. Never use development signing or skip notarization to force a public release through.
+For failures, inspect jobs/logs with GitHub MCP, fix the source, and rerun. Build workflow supports manual dispatch for validation. The release workflow runs after successful main-branch push builds, matching version tags, or manual dispatch. Changing code without increasing the version does not republish an existing release. Never use development signing or skip notarization to force a public release through.
 
 ## Bootstrap and verification
 
