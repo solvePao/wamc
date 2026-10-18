@@ -4,8 +4,6 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
 from version import load_version
 
 REPOSITORY = 'solvePao/wamc'
@@ -20,16 +18,13 @@ def run(*args):
 
 def validate_previous(version, repository=REPOSITORY):
     try:
-        with urlopen(Request(f'https://api.github.com/repos/{repository}/releases/latest',
-                             headers={'Accept': 'application/vnd.github+json'}), timeout=30) as response:
-            latest = json.load(response)
-    except HTTPError as error:
-        if error.code == 404:
+        latest = json.loads(run('api', f'repos/{repository}/releases/latest'))
+    except RuntimeError as error:
+        if isinstance(error.__cause__, subprocess.CalledProcessError) and 'HTTP 404' in error.__cause__.stderr:
             return
         raise
-    metadata = next(asset for asset in latest['assets'] if asset['name'] == 'android-update.json')
-    with urlopen(metadata['browser_download_url'], timeout=30) as response:
-        previous = json.load(response)
+    previous = json.loads(run('release', 'download', latest['tag_name'], '--repo', repository,
+                              '--pattern', 'android-update.json', '--output', '-'))
     current_tuple = tuple(map(int, version['version'].split('.')))
     previous_tuple = tuple(map(int, previous['version'].split('.')))
     if current_tuple <= previous_tuple or version['build'] <= previous['build']:
