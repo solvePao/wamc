@@ -10,6 +10,7 @@ settings. Publication requires an anonymously accessible stable release in
 unavailable, publication fails before uploading or deploying. After publishing
 paired binaries, rerun the workflow manually if a deployment retry is needed.
 
-Download links point to the latest public release rather than versioned assets.
+The download link points to the verified v0.2.2 release, which includes both apps.
+Update the link and its version label together when promoting a newer release.
 Keep requirements and compatibility claims aligned with validated product behavior.
 The device artwork is an illustration, not a screenshot.
