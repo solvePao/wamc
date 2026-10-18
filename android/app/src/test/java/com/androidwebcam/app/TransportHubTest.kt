@@ -2,10 +2,12 @@ package com.androidwebcam.app
 
 import com.androidwebcam.app.protocol.WireProtocol
 import com.androidwebcam.app.transport.TransportHub
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -76,22 +78,37 @@ class TransportHubTest {
         val out = GatedOutputStream()
         val input = GatedInputStream()
         hub.attach(input, out, onControl = {}, lowLatency = true)
-        hub.sendHello(byteArrayOf(1))
-        assertTrue(out.enteredWrite.await(5, TimeUnit.SECONDS))
+        try {
+            hub.sendHello(byteArrayOf(1))
+            assertTrue(out.enteredWrite.await(5, TimeUnit.SECONDS))
 
-        hub.sendVideo(byteArrayOf(1), false, 1)
-        hub.sendVideo(byteArrayOf(2), false, 2)
-        hub.sendVideo(byteArrayOf(3), true, 3)
+            hub.sendVideo(byteArrayOf(1), false, 1)
+            hub.sendVideo(byteArrayOf(2), false, 2)
+            hub.sendVideo(byteArrayOf(3), true, 3)
 
-        val stats = hub.stats()
-        assertEquals(4L, stats.offered)
-        assertEquals(2L, stats.dropped)
-        assertEquals(0L, stats.written)
+            val stats = hub.stats()
+            assertEquals(4L, stats.offered)
+            assertEquals(2L, stats.dropped)
+            assertEquals(0L, stats.written)
 
-        out.release.countDown()
-        input.release.countDown()
-        assertTrue(awaitCondition { hub.peerCount() == 0 })
-        assertTrue(hub.stats().written >= 1L)
+            out.release.countDown()
+            // Reader EOF detaches the peer independently of writer progress.
+            // Keep input open until both the HELLO and latest video have completed.
+            assertTrue(awaitCondition { hub.stats().written == 2L })
+            val frames = ByteArrayInputStream(out.bytes.toByteArray())
+            assertEquals(WireProtocol.TYPE_HELLO, WireProtocol.readFrame(frames).type)
+            val video = WireProtocol.readFrame(frames)
+            assertEquals(WireProtocol.TYPE_VIDEO, video.type)
+            assertTrue(video.isKeyframe)
+            assertArrayEquals(byteArrayOf(3), video.payload)
+
+            input.release.countDown()
+            assertTrue(awaitCondition { hub.peerCount() == 0 })
+        } finally {
+            out.release.countDown()
+            input.release.countDown()
+            hub.closeAll()
+        }
     }
 
     @Test fun failedPeerWriteDetachesPeer() {
