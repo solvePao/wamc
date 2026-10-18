@@ -73,7 +73,7 @@ Open for later: public Developer ID distribution/notarization, 60 FPS/4K, other 
 
 ## GitHub distribution and updates — 2026-10-18
 
-- Keep source private in `solvePao/wamc`; publish paired artifacts and update metadata in public `solvePao/wamc-releases`. No store submission.
+- Host source publicly in `solvePao/wamc` so the current GitHub plan supports protected `main`; publish paired artifacts and update metadata in `solvePao/wamc-releases`. Main requires pull requests and passing Android/Mac checks, including for administrators. No store submission.
 - Tag releases with `vMAJOR.MINOR.PATCH`; `release.json` supplies semantic version and increasing build number for both apps and camera extension.
 - Android uses a permanent release key and native installer approval. Mac uses arm64 Developer ID signing, notarization, and Sparkle signed updates.
 - Check once per process launch, prompt before download, and defer installation during streaming. Manual update checks remain available.

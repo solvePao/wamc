@@ -1,6 +1,6 @@
 # GitHub release setup
 
-WAMC distributes directly through `solvePao/wamc-releases`. Source stays in the private `solvePao/wamc` repository. No App Store or Play Store submission occurs.
+WAMC distributes directly through `solvePao/wamc-releases`. Source is hosted in `solvePao/wamc`. The repository is public so GitHub branch protection is available on the current plan. No App Store or Play Store submission occurs.
 
 ## Apple credentials
 
@@ -54,7 +54,7 @@ The final command prompts for the password without placing it in command history
 
 1. Update `release.json`: increase both `version` and `build`. Initial updater release is `0.2.0`, build `4`.
 2. Run Build CI and review both platform checks. Android and Mac retain 90% production line coverage gates.
-3. Commit the validated version, tag it `v0.2.0` (matching the version file), and push that tag to the private source repository.
+3. Commit the validated version, tag it `v0.2.0` (matching the version file), and push that tag to the source repository.
 4. Release CI signs the APK, signs and notarizes the Mac app and DMG, and signs the DMG for Sparkle.
 5. After both builds succeed, publication creates a draft in the public binary repository, uploads paired artifacts and update metadata, verifies its asset set, then publishes it.
 
@@ -73,3 +73,7 @@ Validate an upgrade between two signed builds on a physical Android phone and Ma
 ## Configured publisher credential
 
 The repository-restricted WAMC release publisher token expires on November 17, 2026. Rotate `RELEASE_PUBLISH_TOKEN` in the release environment before that date. Its scope is `solvePao/wamc-releases` only, Contents read/write plus required Metadata read-only.
+
+## Main branch protection
+
+`main` requires pull requests and successful GitHub Actions checks named `android` and `macos`. Branches must be up to date before merging, and review conversations must be resolved. Protection applies to administrators; force pushes and branch deletion are disabled. Independent review approval is optional so a solo maintainer can merge a passing pull request. Repository administrators can still change these settings.

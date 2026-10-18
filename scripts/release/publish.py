@@ -57,7 +57,7 @@ def publish(directory):
     validate_previous(version)
     if existing is None:
         run('release', 'create', tag, '--repo', REPOSITORY, '--draft', '--title', f'WAMC {version["version"]}',
-            '--notes', 'Signed Android APK and notarized Apple silicon macOS DMG. Source remains private.')
+            '--notes', 'Signed Android APK and notarized Apple silicon macOS DMG. Source: https://github.com/solvePao/wamc.')
         existing = find_release(tag)
         if existing is None or not existing['draft']:
             raise ValueError('Expected the newly created draft release')
