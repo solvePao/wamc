@@ -4,6 +4,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.view.Surface
+import com.androidwebcam.app.util.AppLog
 
 /**
  * Hardware encoder (AVC or HEVC) fed directly from Camera2 via an input
@@ -16,12 +17,15 @@ class VideoEncoder private constructor(
     val height: Int,
     val fps: Int,
     val profile: StreamProfile,
+    private val lowLatency: Boolean,
     private val onConfig: (sps: ByteArray, pps: ByteArray) -> Unit,
     private val onConfigSets: ((paramSets: List<ByteArray>) -> Unit)?,
     private val onFrame: (data: ByteArray, isKeyframe: Boolean, ptsUs: Long) -> Unit,
-) {
+) : StreamingEncoder {
     private var codec: MediaCodec? = null
-    val inputSurface: Surface
+    override val inputSurface: Surface
+    private val outputHandler = VideoEncoderOutputHandler(profile, onConfig, onConfigSets, onFrame)
+    private lateinit var lifecycle: EncoderLifecycle
 
     init {
         val format = MediaFormat.createVideoFormat(profile.mime, profile.width, profile.height).apply {
@@ -32,6 +36,13 @@ class VideoEncoder private constructor(
             setInteger(MediaFormat.KEY_BITRATE_MODE, profile.bitrateMode)
             runCatching { setInteger("max-bframes", 0) } // low latency; ignored where unsupported
             runCatching { setInteger(MediaFormat.KEY_LATENCY, 0) }
+            if (lowLatency) {
+                // Wi-Fi path: ask the encoder for realtime priority and an
+                // operating rate at the target fps. Hints only — the output
+                // format log in onOutputFormatChanged shows what stuck.
+                runCatching { setInteger(MediaFormat.KEY_PRIORITY, 0) }
+                runCatching { setInteger(MediaFormat.KEY_OPERATING_RATE, profile.fps) }
+            }
         }
         codec = MediaCodec.createEncoderByType(profile.mime).also { prepared ->
             prepared.setCallback(object : MediaCodec.Callback() {
@@ -42,33 +53,33 @@ class VideoEncoder private constructor(
                     buffer.position(info.offset); buffer.limit(info.offset + info.size)
                     val data = ByteArray(info.size).also { buffer.get(it) }
                     c.releaseOutputBuffer(i, false)
-                    if (data.isEmpty()) return
-                    // Some encoders (incl. this HEVC path) deliver VPS/SPS/PPS
-                    // as a CODEC_CONFIG buffer instead of csd entries: consume
-                    // it for CONFIG, never forward it as a video frame.
-                    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                        emitParamSets(listOf(data))
-                        return
-                    }
-                    val isKey = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
-                    onFrame(data, isKey, info.presentationTimeUs)
+                    outputHandler.onOutput(data, info.flags, info.presentationTimeUs)
                 }
 
-                override fun onError(c: MediaCodec, e: MediaCodec.CodecException) = Unit
+                override fun onError(c: MediaCodec, e: MediaCodec.CodecException) {
+                    AppLog.error("VideoEncoder", "encoder callback failed (${e.errorCode})", e)
+                }
                 override fun onOutputFormatChanged(c: MediaCodec, f: MediaFormat) {
-                    // AVC reports csd-0/1 (sps/pps); HEVC adds csd-2. Entries
-                    // may each pack several NALs, so split before ordering.
-                    val raw = (0..2).mapNotNull { n ->
-                        f.getByteBuffer("csd-$n")?.let { bb ->
-                            ByteArray(bb.remaining()).also { bb.get(it) }
-                        }
+                    if (lowLatency) {
+                        AppLog.debug("VideoEncoder", "Wi-Fi output format: $f")
                     }
-                    if (raw.isNotEmpty()) emitParamSets(raw)
+                    outputHandler.onOutputFormatChanged(f)
                 }
             })
             prepared.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             inputSurface = prepared.createInputSurface()
         }
+        lifecycle = EncoderLifecycle(object : EncoderRuntime {
+            override fun start() = checkNotNull(codec) { "encoder is not initialized" }.start()
+            override fun requestKeyframe() {
+                codec?.setParameters(android.os.Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                })
+            }
+            override fun stop() { codec?.stop() }
+            override fun release() { codec?.release(); codec = null }
+            override fun releaseInputSurface() { inputSurface.release() }
+        }, profile)
     }
 
     /** Quality-first constructor: HEVC/VBR capable, reports all csd sets. */
@@ -77,15 +88,9 @@ class VideoEncoder private constructor(
         onConfig: (sps: ByteArray, pps: ByteArray) -> Unit,
         onConfigSets: ((paramSets: List<ByteArray>) -> Unit)?,
         onFrame: (data: ByteArray, isKeyframe: Boolean, ptsUs: Long) -> Unit,
-    ) : this(profile.width, profile.height, profile.fps, profile,
+        lowLatency: Boolean = false,
+    ) : this(profile.width, profile.height, profile.fps, profile, lowLatency,
         onConfig, onConfigSets, onFrame)
-
-    private fun emitParamSets(raw: List<ByteArray>) {
-        val nals = raw.flatMap { CodecConfig.splitAnnexB(it) }
-        val ordered = CodecConfig.orderParamSets(profile.codec, nals) ?: return
-        onConfig(ordered[ordered.size - 2], ordered[ordered.size - 1])
-        onConfigSets?.invoke(ordered)
-    }
 
     constructor(
         width: Int,
@@ -102,23 +107,47 @@ class VideoEncoder private constructor(
             bitrateMode = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
             iFrameIntervalSec = 1,
         ),
-        onConfig, null, onFrame,
+        false, onConfig, null, onFrame,
     )
 
-    fun start() { codec?.start() }
-
-    fun requestKeyframe() {
-        runCatching {
-            codec?.setParameters(android.os.Bundle().apply {
-                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-            })
-        }
+    override fun start() {
+        lifecycle.start()
     }
 
-    fun stop() {
-        runCatching { codec?.stop() }
-        runCatching { codec?.release() }
-        codec = null
-        runCatching { inputSurface.release() }
+    override fun requestKeyframe() = lifecycle.requestKeyframe()
+
+    override fun stop() = lifecycle.stop()
+}
+
+/** Processes codec output independently of the hardware callback adapter. */
+internal class VideoEncoderOutputHandler(
+    private val profile: StreamProfile,
+    private val onConfig: (sps: ByteArray, pps: ByteArray) -> Unit,
+    private val onConfigSets: ((paramSets: List<ByteArray>) -> Unit)?,
+    private val onFrame: (data: ByteArray, isKeyframe: Boolean, ptsUs: Long) -> Unit,
+) {
+    fun onOutput(data: ByteArray, flags: Int, presentationTimeUs: Long) {
+        if (data.isEmpty()) return
+        if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+            emitParamSets(listOf(data))
+            return
+        }
+        onFrame(data, flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, presentationTimeUs)
+    }
+
+    fun onOutputFormatChanged(format: MediaFormat) {
+        val raw = (0..2).mapNotNull { index ->
+            format.getByteBuffer("csd-$index")?.let { buffer ->
+                ByteArray(buffer.remaining()).also { buffer.get(it) }
+            }
+        }
+        if (raw.isNotEmpty()) emitParamSets(raw)
+    }
+
+    private fun emitParamSets(raw: List<ByteArray>) {
+        val nals = raw.flatMap { CodecConfig.splitAnnexB(it) }
+        val ordered = CodecConfig.orderParamSets(profile.codec, nals) ?: return
+        onConfig(ordered[ordered.size - 2], ordered[ordered.size - 1])
+        onConfigSets?.invoke(ordered)
     }
 }

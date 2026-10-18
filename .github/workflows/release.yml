@@ -1,0 +1,143 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: wamc-public-release
+  cancel-in-progress: false
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Validate version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/release/version.py --tag "$RELEASE_TAG"
+          python3 -m unittest discover -s scripts/release -p 'test_*.py'
+      - name: Decode permanent Android key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          python3 - <<'PY'
+          import base64, os
+          from pathlib import Path
+          value = os.environ['ANDROID_KEYSTORE_BASE64']
+          if not value:
+              raise SystemExit('Missing ANDROID_KEYSTORE_BASE64 in release environment')
+          path = Path(os.environ['RUNNER_TEMP']) / 'wamc-release.jks'
+          path.write_bytes(base64.b64decode(value, validate=True))
+          path.chmod(0o600)
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'ANDROID_KEYSTORE_PATH={path}\n')
+          PY
+      - name: Build and validate signed APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_SIGNING_SHA256: ${{ vars.ANDROID_SIGNING_SHA256 }}
+        run: |
+          cd android
+          ./gradlew --no-daemon :app:check :app:assembleRelease
+          cd ..
+          python3 scripts/release/verify_apk.py android/app/build/outputs/apk/release/app-release.apk
+          mkdir -p release-dist
+          python3 - <<'PY'
+          import json, shutil
+          version = json.load(open('release.json'))['version']
+          shutil.copyfile('android/app/build/outputs/apk/release/app-release.apk', f'release-dist/WAMC-{version}.apk')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-apk
+          path: release-dist/*.apk
+          if-no-files-found: error
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/wamc-release.jks"
+  macos:
+    runs-on: macos-26
+    environment: release
+    env:
+      WAMC_DISTRIBUTION: 'true'
+      DEVELOPMENT_TEAM: ${{ vars.APPLE_TEAM_ID }}
+      SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate version and architecture
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$(uname -m)" = arm64
+          python3 scripts/release/version.py --tag "$RELEASE_TAG"
+      - name: Import Developer ID signing credentials
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_PROFILE_BASE64: ${{ secrets.MACOS_PROFILE_BASE64 }}
+          MACOS_EXTENSION_PROFILE_BASE64: ${{ secrets.MACOS_EXTENSION_PROFILE_BASE64 }}
+        run: bash scripts/release/setup_macos_signing.sh
+      - name: Check and build signed bundle
+        run: |
+          test -n "$DEVELOPMENT_TEAM"
+          test -n "$SIGN_IDENTITY"
+          bash macos/scripts/build_bundle.sh
+      - name: Notarize app and DMG
+        env:
+          NOTARY_KEY_BASE64: ${{ secrets.NOTARY_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("release.json"))["version"])')
+          bash scripts/release/notarize.sh "$PWD/release-dist/WAMC.app" "$PWD/release-dist/WAMC-$VERSION-arm64.dmg"
+      - name: Sign update archive
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          test -n "$SPARKLE_PRIVATE_KEY"
+          VERSION=$(python3 -c 'import json; print(json.load(open("release.json"))["version"])')
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | macos/.build/artifacts/sparkle/Sparkle/bin/sign_update --ed-key-file - -p "release-dist/WAMC-$VERSION-arm64.dmg" > release-dist/sparkle-signature.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-dmg
+          path: |
+            release-dist/*.dmg
+            release-dist/sparkle-signature.txt
+          if-no-files-found: error
+      - name: Remove signing credentials
+        if: always()
+        run: |
+          if [[ -n "${WAMC_SIGNING_KEYCHAIN:-}" ]]; then security delete-keychain "$WAMC_SIGNING_KEYCHAIN"; fi
+          rm -rf "$RUNNER_TEMP/wamc-signing"
+  publish:
+    needs: [android, macos]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: signed-*
+          merge-multiple: true
+          path: release-dist
+      - name: Generate metadata and publish paired release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN"
+          python3 scripts/release/metadata.py release-dist --signature-file release-dist/sparkle-signature.txt
+          python3 scripts/release/publish.py release-dist

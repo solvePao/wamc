@@ -6,16 +6,34 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.display.DisplayManager
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import android.view.Surface
 import android.view.WindowManager
 import com.androidwebcam.app.protocol.WireProtocol
 import com.androidwebcam.app.transport.AdbSocketTransport
+import com.androidwebcam.app.transport.DiscoveryConfig
 import com.androidwebcam.app.transport.NativeUvcSupport
 import com.androidwebcam.app.transport.TransportHub
 import com.androidwebcam.app.transport.UsbAccessoryTransport
+import com.androidwebcam.app.transport.WamcDiscovery
+import com.androidwebcam.app.transport.WifiDiscoveryAdvertiser
+import com.androidwebcam.app.util.AppLog
+
+internal enum class RemoteStartDecision { START, QUEUE_FOR_VISIBLE_ACTIVITY }
+
+internal object CameraStartPolicy {
+    const val OPEN_APP_STATUS = "Open WAMC on the phone to start the camera"
+
+    fun remoteStartDecision(activityVisible: Boolean): RemoteStartDecision =
+        if (activityVisible) RemoteStartDecision.START
+        else RemoteStartDecision.QUEUE_FOR_VISIBLE_ACTIVITY
+}
 
 /** Foreground service owning camera + encoder + transports while streaming. */
 class CameraStreamingService : Service() {
@@ -28,8 +46,18 @@ class CameraStreamingService : Service() {
     private val hub = TransportHub()
     private lateinit var adbTransport: AdbSocketTransport
     private lateinit var aoaTransport: UsbAccessoryTransport
-    private var camera: CameraController? = null
-    private var encoder: VideoEncoder? = null
+    private var wifiAdvertiser: WifiDiscoveryAdvertiser? = null
+
+    /** Bonjour Wi-Fi discovery. Default ON, persisted, switchable in UI. */
+    var wifiDiscoveryEnabled: Boolean = true
+        private set
+    var wifiDiscoveryChangeListener: ((Boolean) -> Unit)? = null
+    internal var cameraFactory = StreamingCameraFactory { context -> CameraController(context) }
+    internal var encoderFactory = StreamingEncoderFactory { profile, lowLatency, onConfig, onConfigSets, onFrame ->
+        VideoEncoder(profile, onConfig, onConfigSets, onFrame, lowLatency)
+    }
+    private var camera: StreamingCamera? = null
+    private var encoder: StreamingEncoder? = null
     private var previewSurface: Surface? = null
     private var lastConfig: ByteArray? = null
 
@@ -40,8 +68,11 @@ class CameraStreamingService : Service() {
 
     var streaming = false
         private set
+    @Volatile private var activityVisible = false
+    private var pendingStart: PendingStart? = null
+    private var lastErrorStatus: String? = null
     var statusListener: ((String) -> Unit)? = null
-    var rotationListener: ((Int) -> Unit)? = null
+    var rotationListener: ((PreviewOrientation) -> Unit)? = null
     var cameraChangeListener: ((String) -> Unit)? = null
 
     /** Quarter-turns clockwise (0..3); reflected in CONFIG and on the Mac. */
@@ -54,9 +85,9 @@ class CameraStreamingService : Service() {
     private var requestedCodec = "auto"
     private var bitrateOverrideBps: Int? = null
     private var gopOverrideSec: Int? = null
+    /** Wi-Fi low-latency profile requested by the Mac (`latency=low`). */
+    private var lowLatencyWifi = false
     private var peerCodecs: List<Int>? = null
-    private var lastSps: ByteArray? = null
-    private var lastPps: ByteArray? = null
     private var lastParamSets: List<ByteArray>? = null
     private var lastCodec = QualitySelector.AVC
     /** Codec chosen by the latest pipeline (pre-CONFIG, so hello can compare). */
@@ -68,6 +99,25 @@ class CameraStreamingService : Service() {
     private var lastSentWidth = 0
     private var lastSentHeight = 0
     private var lastSentRotation = -1
+    /** Monotonic restart epoch, echoed in HELLO so the Mac can tell rejoins apart. */
+    var streamGeneration = 0
+        private set
+    private val restartGate = RestartGate()
+    /** requestKeyframe that arrived while the encoder was down. */
+    private var pendingKeyframeRequest = false
+    private val mainHandler by lazy { Handler(mainLooper) }
+    private val rotationSchedule = RotationUpdateSchedule(ROTATION_DEBOUNCE_MS)
+    private var appliedOrientation: StreamOrientation? = null
+    private val metadataOnlyCameras = mutableSetOf<String>()
+    private val rotationUpdate = Runnable { updateOrientation() }
+    private var displayManager: DisplayManager? = null
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            scheduleRotationUpdate()
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
@@ -99,13 +149,47 @@ class CameraStreamingService : Service() {
         adbTransport = AdbSocketTransport(hub)
         aoaTransport = UsbAccessoryTransport(this, hub)
         hub.onPeerAttached = {
-            sendHello()
-            resendConfig()
-            encoder?.requestKeyframe()
+            onMain {
+                sendHello()
+                resendConfig()
+                encoder?.requestKeyframe()
+            }
         }
-        val onControl: (Map<String, String>) -> Unit = { handleControl(it) }
+        val onControl: (Map<String, String>) -> Unit = { fields -> onMain { handleControl(fields) } }
         adbTransport.start(onControl)
         aoaTransport.start(onControl)
+        wifiDiscoveryEnabled = prefs.getBoolean(PREF_WIFI_DISCOVERY, true)
+        wifiAdvertiser = WifiDiscoveryAdvertiser(this) {
+            DiscoveryConfig(
+                id = deviceId(),
+                model = Build.MODEL ?: "Android",
+                brand = Build.BRAND ?: "",
+                sdk = Build.VERSION.SDK_INT,
+            )
+        }
+        if (wifiDiscoveryEnabled) wifiAdvertiser?.start()
+        displayManager = runCatching { getSystemService(DisplayManager::class.java) }.getOrNull()
+        runCatching {
+            displayManager?.registerDisplayListener(displayListener, Handler(mainLooper))
+        }
+    }
+
+    /** Stable per-install identity for Bonjour + HELLO. Never rotates. */
+    fun deviceId(): String {
+        prefs.getString(PREF_DEVICE_ID, null)
+            ?.takeIf { WamcDiscovery.isValidId(it) }
+            ?.let { return it }
+        val fresh = WamcDiscovery.newDeviceId()
+        prefs.edit().putString(PREF_DEVICE_ID, fresh).apply()
+        return fresh
+    }
+
+    fun setWifiDiscoveryEnabled(enabled: Boolean) {
+        if (wifiDiscoveryEnabled == enabled) return
+        wifiDiscoveryEnabled = enabled
+        prefs.edit().putBoolean(PREF_WIFI_DISCOVERY, enabled).apply()
+        if (enabled) wifiAdvertiser?.start() else wifiAdvertiser?.stop()
+        wifiDiscoveryChangeListener?.invoke(enabled)
     }
 
     fun getAvailableCameras(): List<CameraInfo> {
@@ -130,7 +214,53 @@ class CameraStreamingService : Service() {
 
     fun setPreviewSurface(surface: Surface?) {
         previewSurface = surface
+        if (surface == null) {
+            // Transient teardown (rotation, backgrounding): stop feeding the
+            // dead surface without rebuilding the encoder; the next live
+            // surface triggers the single restart.
+            if (streaming) camera?.closeCapture()
+            return
+        }
         if (streaming) restartPipeline()
+    }
+
+    /** Activity config changes and display rotation funnel here. */
+    fun notifyConfigurationChanged() {
+        scheduleRotationUpdate()
+    }
+
+    private fun scheduleRotationUpdate() {
+        mainHandler.removeCallbacks(rotationUpdate)
+        mainHandler.postDelayed(rotationUpdate, rotationSchedule.delayMs(SystemClock.uptimeMillis()))
+    }
+
+    private fun updateOrientation() {
+        val desired = rotationSetup()
+        val previous = appliedOrientation
+        if (!streaming || previous == null) {
+            rotationListener?.invoke(desired.preview)
+            return
+        }
+        rotationSchedule.didApply(SystemClock.uptimeMillis())
+        when (RotationResendPolicy.decide(
+            previous.halMode, previous.streamTurns,
+            desired.halMode, desired.streamTurns, hasConfig = true)) {
+            RotationResendPolicy.Action.RESTART -> restartPipeline()
+            else -> {
+                appliedOrientation = desired
+                rotationListener?.invoke(desired.preview)
+                if (previous.streamTurns != desired.streamTurns) {
+                    hub.flushVideo()
+                    restartGate.reset()
+                    resendConfig()
+                    encoder?.requestKeyframe()
+                }
+            }
+        }
+    }
+
+    private fun onMain(action: () -> Unit) {
+        if (Looper.myLooper() == mainLooper) action() else mainHandler.post { action() }
     }
 
     fun setEnhancementEnabled(enabled: Boolean) {
@@ -142,21 +272,59 @@ class CameraStreamingService : Service() {
     }
 
     fun connectAccessory() {
-        aoaTransport.start { handleControl(it) }
+        aoaTransport.start { fields -> onMain { handleControl(fields) } }
     }
 
     fun startStreaming(
         wantW: Int, wantH: Int, wantFps: Int = 30,
         wantQuality: StreamQuality = StreamQuality.BEST,
-    ) {
+    ): Boolean {
+        if (com.androidwebcam.app.update.AndroidUpdates.get(this).installationInProgress) {
+            pendingStart = null
+            emitStatus("Finish the update installation before starting streaming.")
+            return false
+        }
+        if (!streaming && CameraStartPolicy.remoteStartDecision(activityVisible) != RemoteStartDecision.START) {
+            pendingStart = PendingStart(wantW, wantH, wantFps, wantQuality)
+            emitStatus(CameraStartPolicy.OPEN_APP_STATUS)
+            return false
+        }
         width = wantW; height = wantH; fps = wantFps
         quality = wantQuality
         prefs.edit().putString(PREF_QUALITY, quality.key).apply()
-        startForegroundNotification()
-        restartPipeline()
+        try {
+            startForegroundNotification()
+        } catch (t: Throwable) {
+            lastErrorStatus = "Camera service start denied: ${t.message ?: t.javaClass.simpleName}"
+            emitStatus(lastErrorStatus)
+            return false
+        }
+        lastErrorStatus = null
         streaming = true
+        if (!restartPipeline()) {
+            streaming = false
+            runCatching { showIdleNotification() }
+            return false
+        }
         emitStatus()
+        return true
     }
+
+    /** Activity lifecycle is the Android 14+ camera foreground-service gate. */
+    fun setActivityVisible(visible: Boolean) {
+        activityVisible = visible
+    }
+
+    /** Called only by the resumed Activity; remote starts never launch UI. */
+    fun startPendingRequest(): Boolean {
+        val request = pendingStart ?: return false
+        pendingStart = null
+        return startStreaming(request.width, request.height, request.fps, request.quality)
+    }
+
+    private data class PendingStart(
+        val width: Int, val height: Int, val fps: Int, val quality: StreamQuality,
+    )
 
     fun setQuality(q: StreamQuality) {
         quality = q
@@ -165,6 +333,9 @@ class CameraStreamingService : Service() {
     }
 
     fun stopStreaming() {
+        mainHandler.removeCallbacks(rotationUpdate)
+        appliedOrientation = null
+        pendingStart = null
         streaming = false
         // Same ordering as restart: halt capture before releasing surfaces.
         camera?.closeCapture()
@@ -178,7 +349,7 @@ class CameraStreamingService : Service() {
     }
 
     fun switchCamera() {
-        val controller = camera ?: CameraController(this).also {
+            val controller = camera ?: cameraFactory.create(this).also {
             camera = it
             savedCameraId?.let { id -> it.selectCamera(id) }
         }
@@ -192,45 +363,33 @@ class CameraStreamingService : Service() {
 
     /** Manual taps on top of sensor/display compensation; Mac renders the total. */
     fun rotate() {
-        rotationQuarterTurns = (rotationQuarterTurns + 1) % 4
-        resendConfig()
-        encoder?.requestKeyframe()
-        rotationListener?.invoke(previewTurns())
+        setRotation(rotationQuarterTurns + 1)
     }
 
     fun setRotation(quarterTurns: Int) {
         rotationQuarterTurns = quarterTurns and 3
-        resendConfig()
-        encoder?.requestKeyframe()
-        rotationListener?.invoke(previewTurns())
+        mainHandler.removeCallbacks(rotationUpdate)
+        updateOrientation()
     }
 
-    /** Preview matrix turns: HAL output is already upright, else match the Mac. */
-    fun previewTurns(): Int = rotationSetup().previewTurns
-
-    private data class RotationSetup(
-        val halMode: Int?,
-        val macRotation: Int,
-        val previewTurns: Int,
-    )
+    fun previewOrientation(): PreviewOrientation =
+        appliedOrientation?.preview ?: rotationSetup().preview
 
     /**
      * Total orientation = sensor/display/facing compensation plus manual taps.
-     * HAL rotates on-device when supported (preview and encoder arrive upright);
-     * otherwise the total travels in CONFIG and the Mac renders it.
+     * HAL rotates encoder buffers when supported; otherwise the total travels
+     * in CONFIG. TextureView receives a separate residual transform.
      */
-    private fun rotationSetup(): RotationSetup {
+    private fun rotationSetup(): StreamOrientation {
         val controller = camera
-            ?: return RotationSetup(null, rotationQuarterTurns, rotationQuarterTurns)
+        val id = controller?.activeCameraId ?: currentCameraId
         val sensor = runCatching {
-            controller.sensorOrientation(controller.activeCameraId)
+            controller?.sensorOrientation(id) ?: 0
         }.getOrDefault(0)
-        val total = CameraOrientation.totalTurns(
-            sensor, deviceDegrees(), !controller.facingBack, rotationQuarterTurns)
-        val plan = RotationPlanner.plan(
-            total, controller.rotateAndCropModes(controller.activeCameraId))
-        val preview = if (plan.halRotateMode != null) 0 else total
-        return RotationSetup(plan.halRotateMode, plan.configRotation, preview)
+        val modes = controller?.rotateAndCropModes(id).orEmpty()
+        val allowedModes = if (id in metadataOnlyCameras) modes.intersect(setOf(0)) else modes
+        return StreamOrientation.create(id, streamGeneration, sensor, deviceDegrees(),
+            !isBackFacing(), rotationQuarterTurns, allowedModes)
     }
 
     private fun deviceDegrees(): Int = runCatching {
@@ -244,10 +403,14 @@ class CameraStreamingService : Service() {
         }
     }.getOrDefault(0)
 
-    private fun resendConfig() {
+    private fun resendConfig(force: Boolean = true) {
         val sets = lastParamSets ?: return
         if (lastWidth == 0 || sets.size < 2) return
-        val effectiveRotation = rotationSetup().macRotation
+        val effectiveRotation = appliedOrientation?.streamTurns ?: return
+        if (!force && lastSentCodec == lastCodec && lastSentWidth == lastWidth &&
+            lastSentHeight == lastHeight && lastSentRotation == effectiveRotation &&
+            lastSentSets?.let { previous -> previous.size == sets.size &&
+                previous.zip(sets).all { (a, b) -> a.contentEquals(b) } } == true) return
         hub.sendConfigV2(WireProtocol.encodeConfigV2(
             lastCodec, sets, lastWidth, lastHeight, fps, effectiveRotation))
         lastSentSets = sets; lastSentCodec = lastCodec
@@ -269,78 +432,116 @@ class CameraStreamingService : Service() {
     fun peerCount(): Int = hub.peerCount()
     fun uvcGuidance(): String = NativeUvcSupport.guidance()
 
-    private fun restartPipeline() {
+    private fun restartPipeline(): Boolean {
         try {
             restartPipelineUnsafe()
+            lastErrorStatus = null
+            return true
         } catch (t: Throwable) {
-            android.util.Log.e("AWC", "pipeline restart failed", t)
+            AppLog.error("CameraStreamingService", "pipeline restart failed", t)
             encoder = null
-            emitStatus("Camera unavailable: ${t.message}")
+            val reason = t.message ?: t.javaClass.simpleName
+            lastErrorStatus = "Encoder failed: $reason"
+            emitStatus(lastErrorStatus)
+            return false
         }
     }
 
     private fun restartPipelineUnsafe() {
+        // New epoch: flush stale VIDEO so it can never sit ahead of the new
+        // CONFIG in TCP order, then gate frames until the first IDR.
+        streamGeneration = StreamGeneration.next(streamGeneration)
+        appliedOrientation = null
+        hub.flushVideo()
+        restartGate.reset()
         // Stop capture BEFORE releasing the encoder surface: the camera must
         // never target a released surface (HAL buffer errors / session death).
         camera?.closeCapture()
         encoder?.stop()
         encoder = null
-        val controller = camera ?: CameraController(this).also { camera = it }
-        controller.openErrorListener = { msg -> emitStatus("Camera unavailable: $msg") }
-        controller.enhancementEnabled = enhancementEnabled
+        val controller = camera ?: cameraFactory.create(this).also { camera = it }
         savedCameraId?.let { controller.selectCamera(it) }
+        val generation = streamGeneration
+        val cameraId = controller.activeCameraId
+        controller.openErrorListener = { msg ->
+            onMain {
+                if (appliedOrientation?.belongsTo(cameraId, generation) == true) {
+                    lastErrorStatus = "Camera open failed: $msg"
+                    emitStatus(lastErrorStatus)
+                }
+            }
+        }
+        controller.rotationRejectedListener = { rejectedCamera ->
+            // Camera callbacks run on the camera thread; rebuild only the still-live generation.
+            mainHandler.post {
+                val current = appliedOrientation
+                if (current?.belongsTo(rejectedCamera, generation) == true) {
+                    if (current.halMode != 0 && metadataOnlyCameras.add(rejectedCamera)) {
+                        AppLog.warning("CameraStreamingService", "HAL rotation rejected on $rejectedCamera; using metadata")
+                        restartPipeline()
+                    } else {
+                        stopStreaming()
+                        lastErrorStatus = "Camera cannot disable automatic rotation"
+                        emitStatus(lastErrorStatus)
+                    }
+                }
+            }
+        }
+        controller.enhancementEnabled = enhancementEnabled
+        controller.lowLatencyEnhancement = lowLatencyWifi
         val size = controller.chooseSize(controller.activeCameraId, width, height)
         val phoneCodecs = EncoderCaps.supportedCodecs()
         val codec = QualitySelector.pickCodec(requestedCodec, phoneCodecs, peerCodecs)
         activeCodec = codec
         val profile = QualitySelector.profileFor(
             quality, codec, size.width, size.height, fps,
-            bitrateOverrideBps, gopOverrideSec)
-        android.util.Log.i("AWC",
+            bitrateOverrideBps, gopOverrideSec, lowLatency = lowLatencyWifi)
+        AppLog.info("CameraStreamingService",
             "pipeline: codec=${if (codec == 1) "hevc" else "avc"} " +
                 "quality=${quality.key} ${profile.width}x${profile.height}@${profile.fps} " +
                 "${profile.bitrateBps / 1_000_000}Mbps gop=${profile.iFrameIntervalSec}s " +
+                "latency=${if (lowLatencyWifi) "wifi-low" else "standard"} " +
                 "(want=$requestedCodec phone=$phoneCodecs peer=$peerCodecs)")
-        val rs = rotationSetup()
-        val enc = VideoEncoder(profile,
-            onConfig = { sps, pps ->
-                lastSps = sps; lastPps = pps
-                lastWidth = size.width; lastHeight = size.height
-            },
+        val orientation = rotationSetup()
+        appliedOrientation = orientation
+        lastParamSets = null
+        lastSentSets = null
+        lastConfig = null
+        lastWidth = 0; lastHeight = 0
+        val enc = encoderFactory.create(profile, lowLatencyWifi,
+            onConfig = { _, _ -> Unit },
             onConfigSets = { sets ->
-                val rotation = rs.macRotation
-                val duplicate = lastSentSets?.let { prev ->
-                    prev.size == sets.size &&
-                        prev.zip(sets).all { (a, b) -> a.contentEquals(b) }
-                } == true && lastSentWidth == size.width && lastSentHeight == size.height &&
-                    lastSentRotation == rotation && lastSentCodec == codec
-                lastParamSets = sets; lastCodec = codec
-                lastWidth = size.width; lastHeight = size.height
-                if (!duplicate) {
-                    lastSentSets = sets; lastSentCodec = codec
-                    lastSentWidth = size.width; lastSentHeight = size.height
-                    lastSentRotation = rotation
-                    // CONFIG2 first (new Macs); legacy CONFIG keeps old Macs alive on AVC.
-                    hub.sendConfigV2(WireProtocol.encodeConfigV2(
-                        codec, sets, size.width, size.height, fps, rotation))
-                    if (codec == WireProtocol.CODEC_AVC) {
-                        lastConfig = WireProtocol.encodeConfig(
-                            sets[sets.size - 2], sets[sets.size - 1],
-                            size.width, size.height, fps, rotation)
-                        hub.sendConfig(lastConfig!!)
+                onMain {
+                    if (appliedOrientation?.belongsTo(orientation.cameraId, generation) == true) {
+                        lastParamSets = sets; lastCodec = codec
+                        lastWidth = size.width; lastHeight = size.height
+                        resendConfig(force = false)
                     }
                 }
             },
-            onFrame = { data, isKey, pts -> hub.sendVideo(data, isKey, pts) })
+            onFrame = { data, isKey, pts ->
+                onMain {
+                    if (appliedOrientation?.belongsTo(orientation.cameraId, generation) == true &&
+                        lastParamSets != null && restartGate.shouldForward(isKey)) {
+                        hub.sendVideo(data, isKey, pts)
+                    }
+                }
+            },
+        )
         encoder = enc
-        enc.start()
-        controller.open(previewSurface, enc.inputSurface, width, height, rs.halMode)
-        rotationListener?.invoke(rs.previewTurns)
         sendHello()
+        enc.start()
+        // Force the opening IDR instead of waiting up to a full GOP. Also
+        // coalesces any requestKeyframe that arrived while the encoder was down.
+        pendingKeyframeRequest = false
+        enc.requestKeyframe()
+        controller.open(previewSurface, enc.inputSurface, width, height, orientation.halMode)
+        rotationListener?.invoke(orientation.preview)
+        rotationSchedule.didApply(SystemClock.uptimeMillis())
         emitStatus()
     }
 
-    private fun handleControl(fields: Map<String, String>) {
+    internal fun handleControl(fields: Map<String, String>) {
         when (fields["cmd"]) {
             "hello" -> {
                 // Mac capability announcement; never starts streaming by itself.
@@ -359,15 +560,22 @@ class CameraStreamingService : Service() {
                 quality = StreamQuality.parse(fields["quality"])
                 bitrateOverrideBps = fields["bitrate"]?.toIntOrNull()
                 gopOverrideSec = fields["gop"]?.toIntOrNull()
+                // Transport-aware profile: the Mac marks Wi-Fi starts with
+                // latency=low (75% bitrate, GOP 1); USB starts omit it.
+                lowLatencyWifi = fields["latency"] == "low"
                 QualitySelector.parsePeerCodecs(fields["codecs"])?.let { peerCodecs = it }
-                startStreaming(
+                val requested = PendingStart(
                     fields["width"]?.toIntOrNull() ?: width,
                     fields["height"]?.toIntOrNull() ?: height,
                     fields["fps"]?.toIntOrNull() ?: fps,
                     quality)
+                startStreaming(requested.width, requested.height, requested.fps, requested.quality)
             }
             "stop" -> stopStreaming()
-            "requestKeyframe" -> encoder?.requestKeyframe()
+            "requestKeyframe" -> {
+                if (encoder != null) encoder?.requestKeyframe()
+                else pendingKeyframeRequest = true
+            }
             "setFacing" -> {
                 val wantBack = fields["facing"] != "front"
                 if (isBackFacing() != wantBack) switchCamera()
@@ -380,27 +588,41 @@ class CameraStreamingService : Service() {
     }
 
     private fun sendHello() {
-        val controller = camera ?: return
-        val (back, front) = controller.cameraIds()
+        // Works idle too (no camera yet): enumerate without opening it so a
+        // Wi-Fi Mac can verify TXT id == HELLO id before streaming starts.
+        val available = camera?.availableCameras ?: getAvailableCameras()
+        val hasBack = available.any {
+            it.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK
+        }
+        val hasFront = available.any {
+            it.facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_FRONT
+        }
         val cameras = listOfNotNull(
-            if (back != null) "back" else null,
-            if (front != null) "front" else null).joinToString(",")
+            if (hasBack) "back" else null,
+            if (hasFront) "front" else null).joinToString(",")
         val hello = WireProtocol.encodeControl(mapOf(
             "model" to Build.MODEL, "brand" to Build.BRAND,
             "sdk" to Build.VERSION.SDK_INT.toString(),
             "cameras" to cameras, "uvc" to "unknown",
-            "codecs" to EncoderCaps.csv(), "configV2" to "1"))
+            "codecs" to EncoderCaps.csv(), "configV2" to "1",
+            "id" to deviceId(), "gen" to streamGeneration.toString()))
         hub.sendHello(hello)
     }
 
+    /** Camera/encoder error state for the dashboard; streaming may still need stopping. */
+    val hasCameraError: Boolean get() = lastErrorStatus != null
+
+    /** Current summary for an Activity attaching to an already-running service. */
+    fun currentStatus(): String = when {
+        lastErrorStatus != null -> lastErrorStatus!!
+        pendingStart != null -> CameraStartPolicy.OPEN_APP_STATUS
+        !streaming -> "Not streaming"
+        hub.peerCount() > 0 -> "Streaming to Mac (${hub.peerCount()} connection)"
+        else -> "Streaming — waiting for Mac on USB"
+    }
+
     private fun emitStatus(note: String? = null) {
-        val state = when {
-            note != null -> note
-            !streaming -> "Not streaming"
-            hub.peerCount() > 0 -> "Streaming to Mac (${hub.peerCount()} connection)"
-            else -> "Streaming — waiting for Mac on USB"
-        }
-        statusListener?.invoke(state)
+        statusListener?.invoke(note ?: currentStatus())
     }
 
     private fun notification(text: String): Notification {
@@ -430,7 +652,10 @@ class CameraStreamingService : Service() {
     }
 
     override fun onDestroy() {
+        runCatching { displayManager?.unregisterDisplayListener(displayListener) }
         stopStreaming()
+        wifiAdvertiser?.stop()
+        wifiAdvertiser = null
         adbTransport.close()
         aoaTransport.close()
         hub.closeAll()
@@ -440,8 +665,11 @@ class CameraStreamingService : Service() {
     companion object {
         private const val CHANNEL = "streaming"
         private const val ID = 1
+        private const val ROTATION_DEBOUNCE_MS = 500L
         private const val PREF_CAMERA_ID = "selected_camera_id"
         private const val PREF_ENHANCE = "enhance_enabled"
         private const val PREF_QUALITY = "stream_quality"
+        private const val PREF_DEVICE_ID = "device_id"
+        private const val PREF_WIFI_DISCOVERY = "wifi_discovery"
     }
 }

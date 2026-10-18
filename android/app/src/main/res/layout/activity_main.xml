@@ -1,219 +1,161 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/mainLayout"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="#0F172A"
-    android:baselineAligned="false">
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="@color/dashboard_background"
+    android:paddingStart="16dp" android:paddingEnd="16dp"
+    android:paddingTop="12dp" android:paddingBottom="12dp">
 
-    <!-- Top: Camera preview taking half of the screen, always square (1:1) -->
-    <FrameLayout
-        android:id="@+id/previewContainer"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:background="#000000">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:minHeight="40dp" android:gravity="center_vertical"
+        android:layout_marginBottom="12dp" android:orientation="horizontal">
+        <ImageView android:layout_width="32dp" android:layout_height="32dp"
+            android:padding="5dp" android:src="@drawable/ic_camera"
+            android:background="@drawable/bg_badge" android:importantForAccessibility="no" />
+        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+            android:layout_weight="1" android:layout_marginStart="10dp" android:orientation="vertical">
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="@string/app_name" android:textColor="@color/dashboard_text"
+                android:textSize="21sp" android:fontFamily="sans-serif-medium" android:letterSpacing="0.06" />
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="@string/dashboard_subtitle" android:textColor="@color/dashboard_muted"
+                android:textSize="9sp" android:letterSpacing="0.10" />
+        </LinearLayout>
+        <Button android:id="@+id/updateMenu"
+            android:layout_width="40dp" android:layout_height="40dp"
+            android:minWidth="0dp" android:minHeight="0dp" android:padding="0dp"
+            android:background="@drawable/bg_badge" android:text="⋮"
+            android:textColor="@color/dashboard_accent" android:textSize="24sp"
+            android:contentDescription="Check for Updates" />
+        <TextView android:id="@+id/stateBadge"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginStart="8dp" android:background="@drawable/bg_badge"
+            android:paddingHorizontal="12dp" android:paddingVertical="7dp"
+            android:text="@string/dashboard_connecting" android:textColor="@color/dashboard_accent"
+            android:textSize="12sp" android:fontFamily="sans-serif-medium" />
+    </LinearLayout>
 
-        <!-- Always square (1:1) camera preview. No background here:
-             TextureView rejects background drawables. -->
-        <com.androidwebcam.app.ui.SquareTextureView
-            android:id="@+id/preview"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:layout_gravity="center" />
-    </FrameLayout>
+    <com.androidwebcam.app.ui.DashboardLayout android:id="@+id/dashboard"
+        android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
+        <FrameLayout android:id="@+id/previewContainer"
+            android:layout_width="match_parent" android:layout_height="match_parent"
+            android:background="@drawable/bg_preview" android:clipToOutline="true">
+            <com.androidwebcam.app.ui.SquareTextureView android:id="@+id/preview"
+                android:layout_width="match_parent" android:layout_height="match_parent"
+                android:layout_gravity="center" android:contentDescription="@string/dashboard_preview_description" />
+            <LinearLayout android:id="@+id/previewPlaceholder"
+                android:layout_width="match_parent" android:layout_height="match_parent"
+                android:gravity="center" android:orientation="vertical" android:padding="24dp"
+                android:background="#080B0C">
+                <ImageView android:id="@+id/previewEmptyIcon" android:layout_width="40dp" android:layout_height="40dp"
+                    android:src="@drawable/ic_camera" android:alpha="0.6" android:importantForAccessibility="no" />
+                <TextView android:id="@+id/previewEmptyTitle" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp" android:text="@string/dashboard_preview_title"
+                    android:textColor="@color/dashboard_text" android:textSize="17sp" android:fontFamily="sans-serif-medium" />
+                <TextView android:id="@+id/previewEmptyHint" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp" android:text="@string/dashboard_preview_hint"
+                    android:gravity="center" android:textColor="@color/dashboard_muted" android:textSize="12sp" />
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_gravity="top" android:layout_margin="10dp" android:gravity="top"
+                android:orientation="horizontal">
+                <TextView android:id="@+id/status" android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:layout_marginEnd="8dp" android:background="@drawable/bg_overlay"
+                    android:padding="10dp" android:text="@string/dashboard_idle_status" android:textSize="12sp"
+                    android:textColor="@color/dashboard_text" android:accessibilityLiveRegion="polite"
+                    android:maxLines="3" android:ellipsize="end" />
+                <TextView android:id="@+id/orientationLabel" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:background="@drawable/bg_overlay" android:padding="10dp"
+                    android:textColor="@color/dashboard_text" android:textSize="12sp" />
+            </LinearLayout>
+            <LinearLayout android:id="@+id/cameraActions" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_gravity="bottom" android:layout_margin="10dp" android:orientation="horizontal"
+                android:baselineAligned="false" android:gravity="center_vertical">
+                <Button android:id="@+id/switchCamera" style="@style/Dashboard.Button"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:layout_marginEnd="4dp" android:background="@drawable/bg_overlay"
+                    android:drawableStart="@drawable/ic_switch_camera" android:text="@string/switch_camera" />
+                <Button android:id="@+id/rotate" style="@style/Dashboard.Button"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:layout_marginStart="4dp" android:background="@drawable/bg_overlay"
+                    android:drawableStart="@drawable/ic_rotate" android:text="@string/rotate" />
+            </LinearLayout>
+        </FrameLayout>
 
-    <!-- Bottom: Buttons and controls taking half of the screen -->
-    <ScrollView
-        android:id="@+id/controlsContainer"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:fillViewport="true">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="20dp">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="WAMC"
-                android:textColor="#F8FAFC"
-                android:textSize="28sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingBottom="14dp"
-                android:text="Wired Android Mac Camera"
-                android:textColor="#94A3B8"
-                android:textSize="14sp" />
-
-            <TextView
-                android:id="@+id/status"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingTop="4dp"
-                android:text="Not streaming"
-                android:textColor="#E2E8F0"
-                android:textSize="16sp" />
-
-            <TextView
-                android:id="@+id/orientationLabel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:paddingTop="4dp"
-                android:text="Orientation: 0°"
-                android:textColor="#94A3B8"
-                android:textSize="14sp" />
-
-            <LinearLayout
-                android:id="@+id/usbSetupCard"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:background="@drawable/bg_card"
-                android:orientation="vertical"
-                android:padding="14dp"
-                android:visibility="gone">
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/usb_setup_title"
-                    android:textColor="#F8FAFC"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="@string/usb_setup_desc"
-                    android:textColor="#94A3B8"
-                    android:textSize="13sp" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:orientation="horizontal">
-
-                    <Button
-                        android:id="@+id/btnConfigureUsb"
-                        android:layout_width="0dp"
-                        android:layout_height="48dp"
-                        android:layout_marginEnd="6dp"
-                        android:layout_weight="1"
-                        android:background="@drawable/bg_btn_primary"
-                        android:text="@string/usb_setup_action"
-                        android:textColor="#FFFFFF"
-                        android:textSize="14sp"
-                        android:textStyle="bold" />
-
-                    <Button
-                        android:id="@+id/btnDismissUsbSetup"
-                        android:layout_width="wrap_content"
-                        android:layout_height="48dp"
-                        android:background="@drawable/bg_btn_secondary"
-                        android:text="@string/usb_setup_dismiss"
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
+        <ScrollView android:id="@+id/controlsContainer"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:fillViewport="false" android:clipToPadding="false" android:scrollbars="none">
+            <LinearLayout android:id="@+id/controlContent" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:baselineAligned="false">
+                    <LinearLayout android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1"
+                        android:layout_marginEnd="5dp" android:background="@drawable/bg_card" android:orientation="vertical">
+                        <TextView style="@style/Dashboard.FieldLabel" android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:labelFor="@id/cameraSelector" android:text="@string/dashboard_camera_label" />
+                        <FrameLayout android:layout_width="match_parent" android:layout_height="wrap_content">
+                            <Spinner android:id="@+id/cameraSelector" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:minHeight="48dp" android:background="?android:attr/selectableItemBackground" android:spinnerMode="dropdown"
+                                android:popupBackground="@drawable/bg_card" android:contentDescription="@string/dashboard_camera_description" />
+                            <ImageView android:layout_width="20dp" android:layout_height="20dp" android:layout_gravity="end|center_vertical"
+                                android:layout_marginEnd="6dp" android:src="@drawable/ic_chevron" android:importantForAccessibility="no" />
+                        </FrameLayout>
+                    </LinearLayout>
+                    <LinearLayout android:layout_width="0dp" android:layout_height="match_parent" android:layout_weight="1"
+                        android:layout_marginStart="5dp" android:background="@drawable/bg_card" android:orientation="vertical">
+                        <TextView style="@style/Dashboard.FieldLabel" android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:labelFor="@id/resolution" android:text="@string/dashboard_quality_label" />
+                        <FrameLayout android:layout_width="match_parent" android:layout_height="wrap_content">
+                            <Spinner android:id="@+id/resolution" android:layout_width="match_parent" android:layout_height="wrap_content"
+                                android:minHeight="48dp" android:background="?android:attr/selectableItemBackground" android:spinnerMode="dropdown"
+                                android:popupBackground="@drawable/bg_card" android:contentDescription="@string/dashboard_quality_description" />
+                            <ImageView android:layout_width="20dp" android:layout_height="20dp" android:layout_gravity="end|center_vertical"
+                                android:layout_marginEnd="6dp" android:src="@drawable/ic_chevron" android:importantForAccessibility="no" />
+                        </FrameLayout>
+                    </LinearLayout>
+                </LinearLayout>
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp" android:orientation="vertical" android:background="@drawable/bg_card"
+                    android:clipToOutline="true" android:paddingVertical="4dp">
+                    <Switch android:id="@+id/enhanceToggle" style="@style/Dashboard.Switch"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:text="@string/enhance_filter" android:checked="true" android:contentDescription="@string/dashboard_enhance_description" />
+                    <View android:layout_width="match_parent" android:layout_height="1dp" android:layout_marginHorizontal="12dp" android:background="@color/dashboard_border" />
+                    <Switch android:id="@+id/autoStartToggle" style="@style/Dashboard.Switch"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:text="@string/auto_start" android:checked="true" android:contentDescription="@string/dashboard_auto_description" />
+                    <View android:layout_width="match_parent" android:layout_height="1dp" android:layout_marginHorizontal="12dp" android:background="@color/dashboard_border" />
+                    <Switch android:id="@+id/wifiDiscoveryToggle" style="@style/Dashboard.Switch"
+                        android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:text="@string/wifi_discovery" android:checked="true" android:contentDescription="@string/dashboard_wifi_description" />
+                </LinearLayout>
+                <LinearLayout android:id="@+id/usbSetupCard" android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp" android:background="@drawable/bg_card" android:orientation="vertical"
+                    android:padding="12dp" android:visibility="gone">
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:text="@string/usb_setup_title" android:textColor="@color/dashboard_text"
+                        android:textSize="14sp" android:fontFamily="sans-serif-medium" />
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp" android:text="@string/usb_setup_desc"
+                        android:textColor="@color/dashboard_muted" android:textSize="12sp" />
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp" android:orientation="horizontal">
+                        <Button android:id="@+id/btnConfigureUsb" style="@style/Dashboard.Button"
+                            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                            android:layout_marginEnd="8dp" android:text="@string/usb_setup_action"
+                            android:textColor="@color/dashboard_accent" android:drawableStart="@drawable/ic_usb" />
+                        <Button android:id="@+id/btnDismissUsbSetup" style="@style/Dashboard.Button"
+                            android:layout_width="wrap_content" android:layout_height="wrap_content"
+                            android:background="?android:attr/selectableItemBackground" android:text="@string/usb_setup_dismiss"
+                            android:textColor="@color/dashboard_muted" />
+                    </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
+        </ScrollView>
 
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:background="@drawable/bg_card"
-                android:padding="6dp">
-
-                <Spinner
-                    android:id="@+id/cameraSelector"
-                    android:layout_width="match_parent"
-                    android:layout_height="56dp" />
-            </FrameLayout>
-
-            <FrameLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:background="@drawable/bg_card"
-                android:padding="6dp">
-
-                <Spinner
-                    android:id="@+id/resolution"
-                    android:layout_width="match_parent"
-                    android:layout_height="56dp" />
-            </FrameLayout>
-
-            <Switch
-                android:id="@+id/enhanceToggle"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:checked="true"
-                android:text="@string/enhance_filter"
-                android:textColor="#E2E8F0"
-                android:textSize="15sp" />
-
-            <Switch
-                android:id="@+id/autoStartToggle"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:checked="true"
-                android:text="@string/auto_start"
-                android:textColor="#E2E8F0"
-                android:textSize="15sp" />
-
-            <Button
-                android:id="@+id/toggle"
-                android:layout_width="match_parent"
-                android:layout_height="68dp"
-                android:layout_marginTop="18dp"
-                android:background="@drawable/bg_btn_primary"
-                android:text="@string/start_streaming"
-                android:textColor="#FFFFFF"
-                android:textSize="19sp"
-                android:textStyle="bold" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:orientation="horizontal">
-
-                <Button
-                    android:id="@+id/switchCamera"
-                    android:layout_width="0dp"
-                    android:layout_height="64dp"
-                    android:layout_marginEnd="7dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_btn_secondary"
-                    android:text="@string/switch_camera"
-                    android:textColor="#F8FAFC"
-                    android:textSize="17sp"
-                    android:textStyle="bold" />
-
-                <Button
-                    android:id="@+id/rotate"
-                    android:layout_width="0dp"
-                    android:layout_height="64dp"
-                    android:layout_marginStart="7dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_btn_secondary"
-                    android:text="@string/rotate"
-                    android:textColor="#F8FAFC"
-                    android:textSize="17sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-        </LinearLayout>
-    </ScrollView>
+        <Button android:id="@+id/toggle" style="@style/Dashboard.Button"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:minHeight="56dp" android:background="@drawable/bg_btn_primary"
+            android:text="@string/start_streaming" android:textColor="@color/dashboard_accent_text"
+            android:textSize="16sp" android:drawableStart="@drawable/ic_play"
+            android:drawableTint="@color/dashboard_accent_text" />
+    </com.androidwebcam.app.ui.DashboardLayout>
 </LinearLayout>

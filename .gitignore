@@ -11,3 +11,16 @@ _ls.txt
 .vscode/
 *.dmg
 *.log
+__pycache__/
+*.pyc
+*.provisionprofile
+
+# Release credentials and generated outputs
+.kotlin/
+*.profraw
+*.jks
+*.keystore
+*.p12
+*.p8
+*.pem
+release-dist/

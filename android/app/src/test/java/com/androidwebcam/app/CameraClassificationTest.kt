@@ -3,6 +3,8 @@ package com.androidwebcam.app
 import android.hardware.camera2.CameraCharacteristics
 import com.androidwebcam.app.camera.CameraClassifier
 import com.androidwebcam.app.camera.CameraClassifier.RawCameraProps
+import com.androidwebcam.app.camera.CameraInfo
+import com.androidwebcam.app.camera.DefaultCamera
 import com.androidwebcam.app.camera.LensType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -180,5 +182,59 @@ class CameraClassificationTest {
         val main = result.first { it.id == "0" }
         assertEquals(LensType.MAIN, main.lensType)
         assertEquals("Back Camera (Main)", main.displayName)
+    }
+
+    @Test
+    fun classifiesUnknownMultipleFacingAndDuplicateLensCameras() {
+        val result = CameraClassifier.classifyRawCameras(listOf(
+            RawCameraProps("back-a", CameraCharacteristics.LENS_FACING_BACK, null),
+            RawCameraProps("back-b", CameraCharacteristics.LENS_FACING_BACK, null),
+            RawCameraProps("front-a", CameraCharacteristics.LENS_FACING_FRONT, null),
+            RawCameraProps("front-b", CameraCharacteristics.LENS_FACING_FRONT, null),
+            RawCameraProps("usb-a", CameraCharacteristics.LENS_FACING_EXTERNAL, null),
+            RawCameraProps("usb-b", CameraCharacteristics.LENS_FACING_EXTERNAL, null),
+        ))
+        assertEquals(LensType.MAIN, result.first { it.id == "back-a" }.lensType)
+        assertEquals(LensType.OTHER, result.first { it.id == "back-b" }.lensType)
+        assertEquals("Front Camera 2", result.first { it.id == "front-b" }.displayName)
+        assertEquals("External Camera 2", result.first { it.id == "usb-b" }.displayName)
+
+        val duplicates = CameraClassifier.classifyRawCameras(listOf(
+            RawCameraProps("wide-a", CameraCharacteristics.LENS_FACING_BACK, 5f, eq35mm = 35f),
+            RawCameraProps("wide-b", CameraCharacteristics.LENS_FACING_BACK, 5f, eq35mm = 35f),
+        ))
+        assertEquals("Back Camera (Main) [wide-a]", duplicates[0].displayName)
+        assertEquals("Back Camera (Main) [wide-b]", duplicates[1].displayName)
+    }
+
+    @Test
+    fun equivalentFocalLengthRejectsMissingOrInvalidMeasurements() {
+        assertEquals(null, CameraClassifier.calculateEquivalent35mm(null, 5f, 4f))
+        assertEquals(null, CameraClassifier.calculateEquivalent35mm(5f, 0f, 4f))
+        assertEquals(null, CameraClassifier.calculateEquivalent35mm(5f, 5f, -1f))
+    }
+
+    @Test
+    fun classifiesFocalLengthFallbackAndSelectsPreferredCamera() {
+        val backFacing = CameraCharacteristics.LENS_FACING_BACK
+        val relative = CameraClassifier.classifyRawCameras(listOf(
+            RawCameraProps("wide", backFacing, focalLength = 2f),
+            RawCameraProps("main", backFacing, focalLength = 4f),
+            RawCameraProps("tele", backFacing, focalLength = 5f),
+        ))
+        assertEquals(LensType.ULTRA_WIDE, relative.first { it.id == "wide" }.lensType)
+        assertEquals(LensType.MAIN, relative.first { it.id == "main" }.lensType)
+        assertEquals(LensType.TELEPHOTO, relative.first { it.id == "tele" }.lensType)
+
+        val cameras = listOf(
+            CameraInfo("external", CameraCharacteristics.LENS_FACING_EXTERNAL, LensType.EXTERNAL, "USB"),
+            CameraInfo("main", backFacing, LensType.MAIN, "Back Camera"),
+            CameraInfo("front", CameraCharacteristics.LENS_FACING_FRONT, LensType.FRONT, "Front Camera"),
+        )
+        assertEquals("main", DefaultCamera.pickId(cameras, "main"))
+        assertEquals("front", DefaultCamera.pickId(cameras, "missing"))
+        assertEquals("main", DefaultCamera.pickId(cameras.dropLast(1), null))
+        assertEquals("external", DefaultCamera.pickId(cameras.take(1), null))
+        assertEquals(null, DefaultCamera.pickId(emptyList(), null))
     }
 }

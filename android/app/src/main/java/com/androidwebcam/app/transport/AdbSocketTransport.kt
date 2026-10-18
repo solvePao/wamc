@@ -1,6 +1,6 @@
 package com.androidwebcam.app.transport
 
-import android.util.Log
+import com.androidwebcam.app.util.AppLog
 import java.net.ServerSocket
 import kotlin.concurrent.thread
 
@@ -16,20 +16,34 @@ class AdbSocketTransport(private val hub: TransportHub, private val port: Int = 
         thread(name = "awc-adb-accept", isDaemon = true) {
             runCatching {
                 ServerSocket(port).also { server = it }.use { socket ->
-                    Log.i("AWC", "adb transport listening on $port")
+                    AppLog.info("AdbSocketTransport", "listening on port $port")
                     while (running) {
                         val client = socket.accept()
                         client.tcpNoDelay = true
-                        hub.attach(client.getInputStream(), client.getOutputStream(), onControl)
+                        // adb-forwarded USB peers arrive via loopback; direct
+                        // Wi-Fi peers do not. Wi-Fi gets the shallow queue and
+                        // a small send buffer so stale frames drop at the hub
+                        // (CONFIG/keyframe-aware) instead of in the kernel.
+                        val lowLatency = !client.inetAddress.isLoopbackAddress
+                        if (lowLatency) {
+                            runCatching {
+                                client.sendBufferSize = TransportHub.wifiSendBufferBytes
+                            }.onFailure { AppLog.warning("AdbSocketTransport", "could not tune Wi-Fi send buffer", it) }
+                        }
+                        AppLog.info("AdbSocketTransport", "peer attached lowLatency=$lowLatency from ${client.inetAddress}")
+                        hub.attach(
+                            client.getInputStream(), client.getOutputStream(),
+                            onControl, lowLatency = lowLatency)
                     }
                 }
-            }.onFailure { Log.e("AWC", "adb transport failed on $port", it) }
+            }.onFailure { AppLog.error("AdbSocketTransport", "listener failed on port $port", it) }
         }
     }
 
     override fun close() {
         running = false
         runCatching { server?.close() }
+            .onFailure { AppLog.warning("AdbSocketTransport", "listener close failed", it) }
         server = null
     }
 }

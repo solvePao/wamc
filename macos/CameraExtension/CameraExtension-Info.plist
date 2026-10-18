@@ -19,13 +19,13 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>CMIOExtension</key>
 	<dict>
 		<key>CMIOExtensionMachServiceName</key>
-		<string>FJ696ZCQ56.com.androidwebcam.app.CameraExtension</string>
+		<string>HU27CJ3DK6.com.androidwebcam.app.CameraExtension</string>
 	</dict>
 	<key>NSSystemExtensionUsageDescription</key>
 	<string>Enables Android Camera as a virtual webcam in macOS.</string>

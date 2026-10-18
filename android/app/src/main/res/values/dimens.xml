@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="dashboard_spacing">12dp</dimen>
+    <dimen name="dashboard_padding">16dp</dimen>
+    <dimen name="dashboard_radius">16dp</dimen>
+</resources>

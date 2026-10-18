@@ -1,3 +1,5 @@
+import AndroidWebcamCore
+import CoreImage
 import Foundation
 import SwiftUI
 import AVFoundation
@@ -32,11 +34,46 @@ final class PreviewRenderer {
         layer.backgroundColor = CGColor(gray: 0.08, alpha: 1)
     }
 
+    func clear() { layer.flushAndRemoveImage() }
+
     func enqueue(_ sample: CMSampleBuffer) {
         if layer.status == .failed { layer.flush() }
         guard layer.isReadyForMoreMediaData else { return }
         layer.enqueue(sample)
     }
+}
+
+private let bridgeRenderContext = CIContext(options: [.useSoftwareRenderer: false])
+
+/// Normalizes a decoded frame to the fixed virtual-camera format.
+/// Pass-through at 1920×1080; anything else is aspect-fit letterboxed so the
+/// sink always receives the size its format description promises.
+func normalizedBridgePixels(_ pixelBuffer: CVPixelBuffer) -> CVPixelBuffer {
+    let srcW = CVPixelBufferGetWidth(pixelBuffer)
+    let srcH = CVPixelBufferGetHeight(pixelBuffer)
+    guard BridgeFormat.needsNormalization(srcWidth: srcW, srcHeight: srcH)
+            || CVPixelBufferGetIOSurface(pixelBuffer) == nil else {
+        return pixelBuffer
+    }
+    var dst: CVPixelBuffer?
+    guard CVPixelBufferCreate(nil, BridgeFormat.width, BridgeFormat.height,
+                              kCVPixelFormatType_32BGRA,
+                              [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+                              &dst) == kCVReturnSuccess,
+          let dst else { return pixelBuffer }
+    CVPixelBufferLockBaseAddress(dst, [])
+    defer { CVPixelBufferUnlockBaseAddress(dst, []) }
+    if let base = CVPixelBufferGetBaseAddress(dst) {
+        memset(base, 24, CVPixelBufferGetDataSize(dst))
+    }
+    let rect = BridgeFormat.fitRect(srcWidth: srcW, srcHeight: srcH)
+    guard rect != .zero else { return dst }
+    let scale = rect.width / CGFloat(srcW)
+    let image = CIImage(cvPixelBuffer: pixelBuffer)
+        .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        .transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
+    bridgeRenderContext.render(image, to: dst)
+    return dst
 }
 
 struct PreviewView: NSViewRepresentable {
@@ -50,56 +87,131 @@ struct PreviewView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSView, context: Context) {}
+
+    static func dismantleNSView(_ view: NSView, coordinator: ()) {
+        // A disconnected or closed preview must not retain the previous feed.
+        // The virtual-camera bridge owns its own samples and keeps running.
+        (view.layer as? AVSampleBufferDisplayLayer)?.flushAndRemoveImage()
+    }
+}
+
+enum ExtensionSinkEnqueueResult {
+    case accepted
+    case full
+    case unavailable
+    case failed
+}
+
+protocol ExtensionFrameSink: AnyObject {
+    var available: Bool { get }
+    var connectedStreamName: String? { get }
+    func discover()
+    func enqueue(_ sample: CMSampleBuffer) -> ExtensionSinkEnqueueResult
+    func disconnect()
 }
 
 /// Forwards frames to the virtual camera extension's sink stream (Phase 2).
 /// No-ops gracefully until the extension is installed and approved.
 final class ExtensionBridge {
-    private var bufferQueue: CMSimpleQueue?
-    private(set) var available = false
-
+    private let sink: ExtensionFrameSink
+    private let now: () -> TimeInterval
+    private var fullQueueSince: TimeInterval?
     private var lastDiscoveryAttempt: TimeInterval = 0
+    private(set) var lastEnqueuedAt: TimeInterval?
 
-    init() { discoverSink() }
+    var available: Bool { sink.available }
+    var connectedStreamName: String? { sink.connectedStreamName }
 
-    private(set) var connectedStreamName: String?
+    init(sink: ExtensionFrameSink = CoreMediaIOExtensionSink(),
+         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.sink = sink
+        self.now = now
+        sink.discover()
+    }
+
+    deinit { sink.disconnect() }
 
     func discoverSink() {
+        sink.discover()
+    }
+
+    func send(_ sample: CMSampleBuffer) {
+        let timestamp = now()
+        if !sink.available, timestamp - lastDiscoveryAttempt > 2.0 {
+            lastDiscoveryAttempt = timestamp
+            sink.discover()
+        }
+        guard sink.available else { return }
+        switch sink.enqueue(sample) {
+        case .accepted:
+            fullQueueSince = nil
+            lastEnqueuedAt = timestamp
+        case .full:
+            if let since = fullQueueSince, timestamp - since > 1.0 {
+                sink.disconnect()
+                fullQueueSince = nil
+                lastEnqueuedAt = nil
+                lastDiscoveryAttempt = 0
+            } else if fullQueueSince == nil {
+                fullQueueSince = timestamp
+            }
+        case .unavailable:
+            break
+        case .failed:
+            break
+        }
+    }
+}
+
+/// Native stream operations stay at one boundary so queue ownership is testable.
+struct CoreMediaIOStreamAccess {
+    var copyQueue = CMIOStreamCopyBufferQueue
+    var start = CMIODeviceStartStream
+    var stop = CMIODeviceStopStream
+    var enqueue = CMSimpleQueueEnqueue
+}
+
+/// CoreMediaIO owns the system stream and queue; the bridge owns retry policy.
+final class CoreMediaIOExtensionSink: ExtensionFrameSink {
+    private let reader: CoreMediaIOPropertyReading
+    private let streams: CoreMediaIOStreamAccess
+    private var bufferQueue: CMSimpleQueue?
+    private var sinkDevice: CMIOObjectID?
+    private var sinkStream: CMIOStreamID?
+    private(set) var available = false
+    private(set) var connectedStreamName: String?
+
+    init(reader: CoreMediaIOPropertyReading = CoreMediaIOSystemPropertyReader(),
+         streams: CoreMediaIOStreamAccess = CoreMediaIOStreamAccess()) {
+        self.reader = reader
+        self.streams = streams
+    }
+
+    func discover() {
+        guard !available else { return }
         // Enumerate CMIO devices -> streams; only sink streams hand out a
         // buffer queue via CMIOStreamCopyBufferQueue, so success = found.
-        var address = CMIOObjectPropertyAddress(
-            mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyDevices),
-            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
-            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
-        var size: UInt32 = 0
-        guard CMIOObjectGetPropertyDataSize(
-            CMIOObjectID(kCMIOObjectSystemObject), &address, 0, nil, &size) == noErr,
-              size > 0 else { return }
-        var devices = [CMIOObjectID](repeating: 0, count: Int(size) / MemoryLayout<CMIOObjectID>.size)
-        guard CMIOObjectGetPropertyData(
-            CMIOObjectID(kCMIOObjectSystemObject), &address, 0, nil, size,
-            &size, &devices) == noErr else { return }
+        guard let devices = try? reader.objects(for: UInt32(kCMIOObjectSystemObject),
+                                               selector: UInt32(kCMIOHardwarePropertyDevices)) else { return }
         for device in devices {
-            var streamAddress = CMIOObjectPropertyAddress(
-                mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyStreams),
-                mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
-                mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
-            var streamSize: UInt32 = 0
-            guard CMIOObjectGetPropertyDataSize(device, &streamAddress, 0, nil, &streamSize) == noErr,
-                  streamSize > 0 else { continue }
-            var streams = [CMIOObjectID](repeating: 0,
-                                         count: Int(streamSize) / MemoryLayout<CMIOObjectID>.size)
-            guard CMIOObjectGetPropertyData(device, &streamAddress, 0, nil, streamSize,
-                                            &streamSize, &streams) == noErr else { continue }
-            for stream in streams {
-                guard let name = streamName(stream),
-                      name.localizedCaseInsensitiveContains("sink") else { continue }
+            guard let streamIDs = try? reader.objects(for: device,
+                                                      selector: UInt32(kCMIODevicePropertyStreams)) else { continue }
+            for stream in streamIDs {
+                // Only our own extension's sink may take the feed. Another
+                // virtual camera's sink (e.g. OBS) also matches "sink" and
+                // would steal every frame, leaving FaceTime on the slate.
+                guard let name = try? reader.string(for: stream, selector: UInt32(kCMIOObjectPropertyName)),
+                      name.localizedCaseInsensitiveContains("sink"),
+                      name.localizedCaseInsensitiveContains("Android Camera") else { continue }
                 let queueAlteredProc: CMIODeviceStreamQueueAlteredProc = { (_, _, _) in }
-                _ = CMIODeviceStartStream(device, stream)
                 var unmanaged: Unmanaged<CMSimpleQueue>?
-                if CMIOStreamCopyBufferQueue(CMIOStreamID(stream), queueAlteredProc, nil, &unmanaged) == noErr,
+                if streams.copyQueue(CMIOStreamID(stream), queueAlteredProc, nil, &unmanaged) == noErr,
                    let unmanaged {
-                    bufferQueue = unmanaged.takeRetainedValue()
+                    let queue = unmanaged.takeRetainedValue()
+                    guard streams.start(device, stream) == noErr else { continue }
+                    bufferQueue = queue
+                    sinkDevice = device
+                    sinkStream = stream
                     available = true
                     connectedStreamName = name
                     return
@@ -108,34 +220,28 @@ final class ExtensionBridge {
         }
     }
 
-    private func streamName(_ stream: CMIOObjectID) -> String? {
-        var address = CMIOObjectPropertyAddress(
-            mSelector: CMIOObjectPropertySelector(kCMIOObjectPropertyName),
-            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
-            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
-        var size: UInt32 = 0
-        guard CMIOObjectGetPropertyDataSize(stream, &address, 0, nil, &size) == noErr,
-              size > 0 else { return nil }
-        var value: Unmanaged<CFString>?
-        guard CMIOObjectGetPropertyData(stream, &address, 0, nil,
-                                        UInt32(MemoryLayout<CFString>.size),
-                                        &size, &value) == noErr,
-              let value else { return nil }
-        return value.takeRetainedValue() as String
+    func enqueue(_ sample: CMSampleBuffer) -> ExtensionSinkEnqueueResult {
+        guard available, let bufferQueue else { return .unavailable }
+        guard CMSimpleQueueGetCount(bufferQueue) < CMSimpleQueueGetCapacity(bufferQueue) else {
+            return .full
+        }
+        let retained = Unmanaged.passRetained(sample)
+        if streams.enqueue(bufferQueue, retained.toOpaque()) != noErr {
+            retained.release()
+            return .failed
+        }
+        return .accepted
     }
 
-    func send(_ sample: CMSampleBuffer) {
-        if !available || bufferQueue == nil {
-            let now = ProcessInfo.processInfo.systemUptime
-            if now - lastDiscoveryAttempt > 2.0 {
-                lastDiscoveryAttempt = now
-                discoverSink()
-            }
+    func disconnect() {
+        if let sinkDevice, let sinkStream {
+            _ = streams.stop(sinkDevice, sinkStream)
         }
-        guard available, let bufferQueue else { return }
-        if CMSimpleQueueGetCount(bufferQueue) < CMSimpleQueueGetCapacity(bufferQueue) {
-            CMSimpleQueueEnqueue(bufferQueue, element: Unmanaged.passRetained(sample).toOpaque())
-        }
+        bufferQueue = nil
+        sinkDevice = nil
+        sinkStream = nil
+        available = false
+        connectedStreamName = nil
     }
 }
 
@@ -144,7 +250,8 @@ enum PlaceholderFrame {
     static func make(width: Int = 1920, height: Int = 1080) -> CVPixelBuffer? {
         var buffer: CVPixelBuffer?
         guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA,
-                                  nil, &buffer) == kCVReturnSuccess,
+                                  [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+                                  &buffer) == kCVReturnSuccess,
               let buffer else { return nil }
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }

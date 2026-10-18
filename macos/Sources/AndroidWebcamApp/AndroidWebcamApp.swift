@@ -1,7 +1,27 @@
 import SwiftUI
 
-class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+public class AppDelegate: NSObject, NSApplicationDelegate {
+    public override init() { super.init() }
+
+    public func applicationDidFinishLaunching(_ notification: Notification) {
+        if SetupModel.needsFirstRunSetup {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        // Menu-bar agent: no Dock icon, no window at (login) launch.
+        NSApp.setActivationPolicy(.accessory)
+        // SwiftUI may have created the main window already; close it so a
+        // login launch is invisible until the user opens it from the menu.
+        DispatchQueue.main.async {
+            for window in NSApp.windows {
+                window.close()
+            }
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
             for window in sender.windows {
                 window.makeKeyAndOrderFront(nil)
@@ -11,130 +31,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-@main
-struct WAMCApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var model = AppModel()
+public struct WAMCApplication: Scene {
+    @StateObject private var model: AppModel
+    @StateObject private var updater: AppUpdateController
 
-    var body: some Scene {
-        WindowGroup("WAMC — Wired Android Mac Camera") {
+    public init(startServices: Bool = true) {
+        let model = AppModel(startServices: startServices)
+        _model = StateObject(wrappedValue: model)
+        _updater = StateObject(wrappedValue: AppUpdateController(
+            enabled: startServices,
+            isStreaming: { [weak model] in
+                guard let model else { return false }
+                return model.session.wantsStreaming || model.feedState != .idle
+            },
+            changes: model.objectWillChange.eraseToAnyPublisher()))
+    }
+
+    public var body: some Scene {
+        Window("WAMC — Android Mac Camera", id: "main") {
             ContentView(model: model)
-                .frame(minWidth: 640, minHeight: 480)
+                .frame(minWidth: 820, minHeight: 560)
+                .task { updater.startOnce() }
         }
-        MenuBarExtra("WAMC", systemImage: model.connected ? "video.fill" : "video") {
-            MenuContent(model: model)
+        .defaultSize(width: 1040, height: 680)
+        .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unifiedCompact)
+
+        MenuBarExtra {
+            MenuContent(model: model, updater: updater)
+        } label: {
+            Label("WAMC", systemImage: model.connected ? "video.fill" : "video")
+                .task { updater.startOnce() }
         }
-    }
-}
-
-struct ContentView: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Circle()
-                    .fill(model.connected ? Color.green : Color.red)
-                    .frame(width: 10, height: 10)
-                Text(model.connected ? "Connected" : "Disconnected")
-                    .font(.headline)
-                Spacer()
-                Text(model.deviceLabel).foregroundStyle(.secondary)
-            }
-
-            PreviewView(renderer: model.renderer)
-                .frame(minHeight: 300)
-                .background(Color.black)
-                .cornerRadius(8)
-
-            Text(model.statusText)
-            Text(model.diagnosticsText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            if !model.nativeWebcams.isEmpty {
-                Label("Native USB webcam found: \(model.nativeWebcams.joined(separator: ", ")) — usable directly, no streaming needed.",
-                      systemImage: "web.camera")
-                    .font(.caption)
-            }
-
-            Picker("Quality", selection: $model.qualityMode) {
-                ForEach(QualityMode.allCases) { mode in
-                    Text("\(mode.label) · 30 FPS").tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            HStack {
-                Toggle("Auto-connect on plug", isOn: $model.autoConnect)
-                Toggle("Auto-start camera", isOn: $model.autoStart)
-            }
-
-            HStack {
-                Button(model.connected ? "Disconnect" : "Connect") {
-                    model.connected ? model.disconnect() : model.connect()
-                }
-                Button("Start camera") { model.sendStart() }
-                    .disabled(!model.connected)
-                Button("Stop camera") { model.sendStop() }
-                    .disabled(!model.connected)
-                Button(model.facingBack ? "Use front camera" : "Use rear camera") {
-                    model.switchCamera()
-                }
-                .disabled(!model.connected)
-                Button("Rotate 90°") { model.rotate() }
-                    .disabled(!model.connected)
-                Spacer()
-                Button("Refresh devices") { model.refreshDevices() }
-            }
-
-            Divider()
-
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(model.virtualCameraActive ? Color.green : Color.orange)
-                            .frame(width: 8, height: 8)
-                        Text(model.virtualCameraStatusText)
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                    }
-                    Text("Select virtual camera in FaceTime, Photo Booth, Zoom, or Meet to use phone feed.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Camera Extension Settings") {
-                    model.extensionManager.openSystemSettings()
-                }
-            }
-        }
-        .padding(16)
-    }
-}
-
-struct MenuContent: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        Text(model.connected ? "Connected — \(model.deviceLabel)" : "Not connected")
-        Text(model.diagnosticsText)
-        Divider()
-        Text(model.virtualCameraStatusText)
-        Button("Camera Extension Settings") {
-            model.extensionManager.openSystemSettings()
-        }
-        Button("Set Phone Default USB to File Transfer") {
-            model.configureDeviceDefaultUsb()
-        }
-        Divider()
-        Button(model.connected ? "Disconnect" : "Connect") {
-            model.connected ? model.disconnect() : model.connect()
-        }
-        Button("Start camera") { model.sendStart() }.disabled(!model.connected)
-        Button("Stop camera") { model.sendStop() }.disabled(!model.connected)
-        Divider()
-        Button("Quit") { NSApplication.shared.terminate(nil) }
     }
 }

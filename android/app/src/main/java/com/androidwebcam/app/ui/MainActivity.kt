@@ -1,6 +1,7 @@
 package com.androidwebcam.app.ui
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
@@ -20,56 +21,74 @@ import android.view.Surface
 import android.view.TextureView
 import android.widget.ArrayAdapter
 import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.graphics.Color
 import android.widget.AdapterView
 import com.androidwebcam.app.R
 import com.androidwebcam.app.camera.CameraInfo
+import com.androidwebcam.app.camera.PreviewOrientation
 import com.androidwebcam.app.camera.CameraStreamingService
 import com.androidwebcam.app.util.UsbConfigHelper
 
 class MainActivity : Activity() {
 
+    private lateinit var updates: com.androidwebcam.app.update.UpdatePresenter
     private var service: CameraStreamingService? = null
     private var previewSurface: Surface? = null
-    private lateinit var mainLayout: LinearLayout
-    private lateinit var previewContainer: FrameLayout
-    private lateinit var controlsContainer: ScrollView
+    private lateinit var stateBadge: TextView
+    private lateinit var previewPlaceholder: View
+    private var updatingControls = false
+    private var startAfterPermission = false
     private lateinit var status: TextView
     private lateinit var toggle: Button
     // Nullable so a layout missing this view degrades instead of crashing on startup.
     private var cameraSelector: Spinner? = null
     private var enhanceToggle: Switch? = null
     private var autoStartToggle: Switch? = null
+    private var wifiDiscoveryToggle: Switch? = null
     private val prefs by lazy { getSharedPreferences("wamc_prefs", MODE_PRIVATE) }
     private lateinit var previewView: SquareTextureView
     private lateinit var orientationLabel: TextView
-    private var quarterTurns = 0
+    private var previewOrientation = PreviewOrientation()
     private var cameraList: List<CameraInfo> = emptyList()
 
     private val connection = object : ServiceConnection {
-        override fun onServiceDisconnected(name: ComponentName?) { service = null }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            service = null
+            renderState()
+        }
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val svc = (binder as? CameraStreamingService.LocalBinder)?.service() ?: return
             service = svc
             svc.setPreviewSurface(previewSurface)
-            svc.statusListener = { text -> runOnUiThread { status.text = text } }
+            svc.statusListener = { text -> runOnUiThread { renderState(text) } }
+            svc.wifiDiscoveryChangeListener = { enabled ->
+                runOnUiThread {
+                    updatingControls = true
+                    wifiDiscoveryToggle?.isChecked = enabled
+                    updatingControls = false
+                }
+            }
             svc.rotationListener = { turns ->
                 runOnUiThread { applyRotation(turns) }
             }
             svc.cameraChangeListener = { activeId ->
                 runOnUiThread { updateCameraSelection(activeId) }
             }
-            status.text = svc.uvcGuidance()
-            applyRotation(svc.previewTurns())
+            svc.setActivityVisible(hasWindowFocus() && lifecycleStarted)
+            applyRotation(svc.previewOrientation())
+            updatingControls = true
             enhanceToggle?.isChecked = svc.enhancementEnabled
+            wifiDiscoveryToggle?.isChecked = svc.wifiDiscoveryEnabled
+            updatingControls = false
             updateCameraList(svc)
             maybeAutoStart()
+            renderState(svc.currentStatus())
             if (intent?.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
                 svc.connectAccessory()
             }
@@ -78,10 +97,12 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        updates = com.androidwebcam.app.update.UpdatePresenter(this, com.androidwebcam.app.update.AndroidUpdates.get(this))
+        startAfterPermission = savedInstanceState?.getBoolean(STATE_PERMISSION_START) ?: false
         setContentView(R.layout.activity_main)
-        mainLayout = findViewById(R.id.mainLayout)
-        previewContainer = findViewById(R.id.previewContainer)
-        controlsContainer = findViewById(R.id.controlsContainer)
+        stateBadge = findViewById(R.id.stateBadge)
+        previewPlaceholder = findViewById(R.id.previewPlaceholder)
+        applySystemInsets()
         status = findViewById(R.id.status)
         toggle = findViewById(R.id.toggle)
         orientationLabel = findViewById(R.id.orientationLabel)
@@ -99,13 +120,15 @@ class MainActivity : Activity() {
         }
 
         val resolution: Spinner = findViewById(R.id.resolution)
-        resolution.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("Best quality · auto", "1920 × 1080 · 30 FPS", "1280 × 720 · 30 FPS"))
+        resolution.adapter = dropdownAdapter(listOf(
+            getString(R.string.dashboard_quality_best),
+            getString(R.string.dashboard_quality_high),
+            getString(R.string.dashboard_quality_balanced)))
+        resolution.setSelection(savedInstanceState?.getInt(STATE_QUALITY) ?: 0)
 
         enhanceToggle = findViewById(R.id.enhanceToggle)
         enhanceToggle?.setOnCheckedChangeListener { _, isChecked ->
-            service?.setEnhancementEnabled(isChecked)
+            if (!updatingControls) service?.setEnhancementEnabled(isChecked)
         }
 
         autoStartToggle = findViewById(R.id.autoStartToggle)
@@ -115,14 +138,25 @@ class MainActivity : Activity() {
             if (isChecked) maybeAutoStart()
         }
 
-        updateLayoutForOrientation(resources.configuration.orientation)
+        wifiDiscoveryToggle = findViewById(R.id.wifiDiscoveryToggle)
+        wifiDiscoveryToggle?.isChecked = prefs.getBoolean(PREF_WIFI_DISCOVERY, true)
+        wifiDiscoveryToggle?.setOnCheckedChangeListener { _, isChecked ->
+            // Service owns the advertiser; it persists the same pref key.
+            if (!updatingControls) {
+                val svc = service
+                if (svc != null) svc.setWifiDiscoveryEnabled(isChecked)
+                else prefs.edit().putBoolean(PREF_WIFI_DISCOVERY, isChecked).apply()
+            }
+        }
+
+        renderState()
 
         previewView.surfaceTextureListener =
             object : TextureView.SurfaceTextureListener {
                 override fun onSurfaceTextureAvailable(s: SurfaceTexture, w: Int, h: Int) {
                     previewSurface = Surface(s)
                     service?.setPreviewSurface(previewSurface)
-                    applyRotation(quarterTurns)
+                    applyRotation(previewOrientation)
                 }
                 override fun onSurfaceTextureDestroyed(s: SurfaceTexture): Boolean {
                     service?.setPreviewSurface(null)
@@ -130,7 +164,7 @@ class MainActivity : Activity() {
                     return true
                 }
                 override fun onSurfaceTextureSizeChanged(s: SurfaceTexture, w: Int, h: Int) {
-                    applyRotation(quarterTurns)
+                    applyRotation(previewOrientation)
                 }
                 override fun onSurfaceTextureUpdated(s: SurfaceTexture) = Unit
             }
@@ -139,10 +173,11 @@ class MainActivity : Activity() {
             val svc = service ?: return@setOnClickListener
             if (svc.streaming) {
                 svc.stopStreaming()
-                toggle.text = getString(R.string.start_streaming)
+                renderState(svc.currentStatus())
             } else if (hasCameraPermission()) {
                 startStreamingFromUi()
             } else {
+                startAfterPermission = true
                 requestPermissions(arrayOf(Manifest.permission.CAMERA), REQ_CAMERA)
             }
         }
@@ -154,6 +189,15 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY)
         }
 
+        findViewById<View>(R.id.updateMenu)?.setOnClickListener { anchor ->
+            android.widget.PopupMenu(this, anchor).apply {
+                menu.add("Check for Updates…").setOnMenuItemClickListener {
+                    com.androidwebcam.app.update.AndroidUpdates.get(this@MainActivity).check(manual = true)
+                    true
+                }
+                show()
+            }
+        }
         setupUsbConfigCard()
 
         // Started (not only bound) so the listener survives the activity and
@@ -168,7 +212,7 @@ class MainActivity : Activity() {
     /** Shared tap path: starts with the spinner's quality, flips the button. */
     private fun startStreamingFromUi() {
         val svc = service ?: return
-        if (svc.streaming || !hasCameraPermission()) return
+        if (svc.streaming || !hasCameraPermission() || com.androidwebcam.app.update.AndroidUpdates.get(this).installationInProgress) return
         val spinner: Spinner? = findViewById(R.id.resolution)
         val (w, h, q) = when (spinner?.selectedItemPosition) {
             2 -> Triple(1280, 720, com.androidwebcam.app.camera.StreamQuality.BALANCED)
@@ -176,76 +220,175 @@ class MainActivity : Activity() {
             else -> Triple(1920, 1080, com.androidwebcam.app.camera.StreamQuality.BEST)
         }
         svc.startStreaming(w, h, 30, q)
-        if (::toggle.isInitialized) toggle.text = getString(R.string.stop_streaming)
+        renderState(svc.currentStatus())
     }
 
     /** No-tap start on open / after grant / when re-enabled. */
     private fun maybeAutoStart() {
-        if (autoStartEnabled() && hasCameraPermission()) startStreamingFromUi()
+        val updater = com.androidwebcam.app.update.AndroidUpdates.get(this)
+        if (!updater.installationInProgress && updater.state !is com.androidwebcam.app.update.UpdateState.Ready &&
+            autoStartEnabled() && hasCameraPermission()) startStreamingFromUi()
     }
 
     override fun onResume() {
         super.onResume()
+        lifecycleStarted = true
+        service?.setActivityVisible(true)
         // Bind is sticky: resume without re-bind would otherwise sit idle.
+        service?.startPendingRequest()
         maybeAutoStart()
-        syncToggle()
+        renderState(service?.currentStatus())
+        updates.resume()
     }
 
-    private fun syncToggle() {
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && lifecycleStarted) {
+            service?.let { svc ->
+                // Binding may finish before the first focused window. Retry only
+                // an existing request, so dismissing a menu never starts a stopped stream.
+                svc.setActivityVisible(true)
+                svc.startPendingRequest()
+                renderState(svc.currentStatus())
+            }
+        }
+    }
+
+    override fun onPause() {
+        updates.pause()
+        lifecycleStarted = false
+        service?.setActivityVisible(false)
+        super.onPause()
+    }
+
+    /** Render from service state so remote starts/stops and rebinds match the controls. */
+    private fun renderState(message: String? = null) {
         if (!::toggle.isInitialized) return
-        toggle.text = getString(
-            if (service?.streaming == true) R.string.stop_streaming
-            else R.string.start_streaming)
+        val svc = service
+        val streaming = svc?.streaming == true
+        if (::updates.isInitialized) updates.streamingChanged(svc == null || streaming)
+        status.text = message ?: svc?.currentStatus() ?: getString(R.string.dashboard_connecting)
+        stateBadge.setText(when {
+            svc == null -> R.string.dashboard_connecting
+            svc.hasCameraError -> R.string.dashboard_camera_error
+            streaming -> R.string.dashboard_camera_on
+            else -> R.string.dashboard_ready
+        })
+        val cameraError = svc?.hasCameraError == true
+        stateBadge.setBackgroundResource(if (cameraError) R.drawable.bg_btn_stop else R.drawable.bg_badge)
+        stateBadge.setTextColor(getColor(if (cameraError) R.color.dashboard_stop_text else R.color.dashboard_accent))
+        toggle.setText(if (streaming) R.string.stop_streaming else R.string.start_streaming)
+        toggle.setBackgroundResource(if (streaming) R.drawable.bg_btn_stop else R.drawable.bg_btn_primary)
+        val actionColor = getColor(if (streaming) R.color.dashboard_stop_text else R.color.dashboard_accent_text)
+        toggle.setTextColor(actionColor)
+        toggle.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            if (streaming) R.drawable.ic_stop else R.drawable.ic_play, 0, 0, 0)
+        toggle.compoundDrawableTintList = android.content.res.ColorStateList.valueOf(actionColor)
+        toggle.isEnabled = svc != null
+        toggle.alpha = if (svc != null) 1f else 0.5f
+        // Keep the TextureView attached: visibility changes recreate its surface
+        // and can race the camera open started by the permission/Start path.
+        previewPlaceholder.visibility = if (streaming) View.GONE else View.VISIBLE
+        val ready = svc != null && hasCameraPermission()
+        listOf<View?>(cameraSelector, enhanceToggle, findViewById(R.id.switchCamera), findViewById(R.id.rotate))
+            .forEach { view ->
+                view?.isEnabled = ready
+                view?.alpha = if (ready) 1f else 0.45f
+            }
+        if (!hasCameraPermission() && svc != null) {
+            status.setText(R.string.dashboard_permission_status)
+        }
+        status.contentDescription = status.text
+        status.tooltipText = status.text
+        updatingControls = true
+        svc?.let {
+            enhanceToggle?.isChecked = it.enhancementEnabled
+            wifiDiscoveryToggle?.isChecked = it.wifiDiscoveryEnabled
+        }
+        updatingControls = false
     }
 
-    /** Rotates the square preview; the same turns go to the Mac via CONFIG. */
-    private fun applyRotation(turns: Int) {
-        quarterTurns = turns and 3
+    private fun dropdownAdapter(items: List<String>) = ArrayAdapter(
+        this, R.layout.spinner_item, items).apply {
+        setDropDownViewResource(R.layout.spinner_dropdown_item)
+    }
+
+    @Suppress("DEPRECATION") // The legacy path supports Android 8–10.
+    @SuppressLint("NewApi") // DisplayCutout APIs are guarded for API 28+ below.
+    private fun applySystemInsets() {
+        val root: View = findViewById(R.id.mainLayout)
+        val horizontal = resources.getDimensionPixelSize(R.dimen.dashboard_padding)
+        val vertical = resources.getDimensionPixelSize(R.dimen.dashboard_spacing)
+        // One inset owner across Android 8–15; avoid double padding on older releases.
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.setSystemBarsAppearance(0,
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
+        } else {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        }
+        if (Build.VERSION.SDK_INT < 35) {
+            window.statusBarColor = Color.TRANSPARENT
+            window.navigationBarColor = Color.TRANSPARENT
+        }
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            val left: Int
+            val top: Int
+            val right: Int
+            val bottom: Int
+            if (Build.VERSION.SDK_INT >= 30) {
+                val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                left = bars.left; top = bars.top; right = bars.right; bottom = bars.bottom
+            } else {
+                val cutout = if (Build.VERSION.SDK_INT >= 28) insets.displayCutout else null
+                left = maxOf(insets.systemWindowInsetLeft, cutout?.safeInsetLeft ?: 0)
+                top = maxOf(insets.systemWindowInsetTop, cutout?.safeInsetTop ?: 0)
+                right = maxOf(insets.systemWindowInsetRight, cutout?.safeInsetRight ?: 0)
+                bottom = maxOf(insets.systemWindowInsetBottom, cutout?.safeInsetBottom ?: 0)
+            }
+            view.setPadding(horizontal + left, vertical + top, horizontal + right, vertical + bottom)
+            insets
+        }
+        root.requestApplyInsets()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(STATE_PERMISSION_START, startAfterPermission)
+        outState.putInt(STATE_QUALITY, findViewById<Spinner>(R.id.resolution).selectedItemPosition)
+        super.onSaveInstanceState(outState)
+    }
+
+    /** Apply only the residual TextureView transform; labels describe stream orientation. */
+    private fun applyRotation(orientation: PreviewOrientation) {
+        previewOrientation = orientation
         if (::previewView.isInitialized && previewView.width > 0) {
             val matrix = Matrix()
             matrix.postRotate(
-                (quarterTurns * 90).toFloat(),
+                (orientation.transformTurns * 90).toFloat(),
                 previewView.width / 2f, previewView.height / 2f)
             previewView.setTransform(matrix)
         }
         if (::orientationLabel.isInitialized) {
-            orientationLabel.text = "Orientation: ${quarterTurns * 90}°"
+            orientationLabel.text = getString(R.string.dashboard_orientation, orientation.labelTurns * 90)
+            orientationLabel.contentDescription = getString(R.string.dashboard_orientation_description, orientation.labelTurns * 90)
         }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        updateLayoutForOrientation(newConfig.orientation)
-    }
-
-    private fun updateLayoutForOrientation(orientation: Int) {
-        val isLandscape = orientation == Configuration.ORIENTATION_LANDSCAPE
-        if (::mainLayout.isInitialized && ::previewContainer.isInitialized && ::controlsContainer.isInitialized) {
-            if (isLandscape) {
-                mainLayout.orientation = LinearLayout.HORIZONTAL
-                previewContainer.layoutParams = LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                controlsContainer.layoutParams = LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-            } else {
-                mainLayout.orientation = LinearLayout.VERTICAL
-                previewContainer.layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
-                controlsContainer.layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
-            }
-            if (::previewView.isInitialized) {
-                previewView.post { applyRotation(quarterTurns) }
-            }
-        }
+        findViewById<View>(R.id.dashboard).requestLayout()
+        previewView.post { applyRotation(previewOrientation) }
+        // Display rotation may have changed the compensated total: let the
+        // service resend CONFIG (or restart for a HAL mode change).
+        service?.notifyConfigurationChanged()
     }
 
     private fun updateCameraList(svc: CameraStreamingService) {
         val cameras = svc.getAvailableCameras()
         cameraList = cameras
-        val adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item,
-            cameras.map { it.displayName })
+        val adapter = dropdownAdapter(cameras.map { it.displayName })
         cameraSelector?.adapter = adapter
         updateCameraSelection(svc.currentCameraId)
     }
@@ -262,8 +405,10 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_CAMERA && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             service?.let { updateCameraList(it) }
-            maybeAutoStart()
+            if (startAfterPermission) startStreamingFromUi() else maybeAutoStart()
         }
+        if (requestCode == REQ_CAMERA) startAfterPermission = false
+        renderState(service?.currentStatus())
     }
 
     private fun hasCameraPermission(): Boolean =
@@ -315,13 +460,24 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        service?.let {
+            it.statusListener = null
+            it.rotationListener = null
+            it.cameraChangeListener = null
+            it.wifiDiscoveryChangeListener = null
+        }
         runCatching { unbindService(connection) }
         super.onDestroy()
     }
 
     companion object {
+        private const val STATE_PERMISSION_START = "start_after_permission"
+        private const val STATE_QUALITY = "selected_quality"
         private const val REQ_CAMERA = 1
         private const val REQ_NOTIFY = 2
         private const val PREF_AUTOSTART = "auto_start"
+        private const val PREF_WIFI_DISCOVERY = "wifi_discovery"
     }
+
+    @Volatile private var lifecycleStarted = false
 }

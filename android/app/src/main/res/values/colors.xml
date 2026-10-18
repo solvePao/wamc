@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="dashboard_background">#101315</color>
+    <color name="dashboard_surface">#1B2023</color>
+    <color name="dashboard_border">#343C40</color>
+    <color name="dashboard_text">#F3F6F5</color>
+    <color name="dashboard_muted">#AAB7B7</color>
+    <color name="dashboard_accent">#73E1CC</color>
+    <color name="dashboard_accent_text">#102E29</color>
+    <color name="dashboard_accent_surface">#203C36</color>
+    <color name="dashboard_stop">#3B2528</color>
+    <color name="dashboard_stop_text">#FFC1C5</color>
+    <color name="dashboard_ripple">#2673E1CC</color>
+    <color name="dashboard_overlay">#D9101315</color>
+</resources>

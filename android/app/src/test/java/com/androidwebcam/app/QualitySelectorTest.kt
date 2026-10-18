@@ -47,6 +47,38 @@ class QualitySelectorTest {
         assertEquals(12_000_000, high.bitrateBps)
     }
 
+    @Test fun wifiLowLatencyScalesBitrateTo75PercentAndGopTo1() {
+        val bestHevc = QualitySelector.profileFor(
+            StreamQuality.BEST, 1, 1920, 1080, 30, lowLatency = true)
+        assertEquals(22_500_000, bestHevc.bitrateBps)
+        assertEquals(1, bestHevc.iFrameIntervalSec)
+        assertEquals(1920, bestHevc.width); assertEquals(1080, bestHevc.height)
+        assertEquals(30, bestHevc.fps)
+        val bestAvc = QualitySelector.profileFor(
+            StreamQuality.BEST, 0, 1920, 1080, 30, lowLatency = true)
+        assertEquals(18_750_000, bestAvc.bitrateBps)
+        val high = QualitySelector.profileFor(
+            StreamQuality.HIGH, 1, 1920, 1080, 30, lowLatency = true)
+        assertEquals(9_000_000, high.bitrateBps)
+        val balanced = QualitySelector.profileFor(
+            StreamQuality.BALANCED, 0, 1280, 720, 30, lowLatency = true)
+        assertEquals(6_000_000, balanced.bitrateBps)
+    }
+
+    @Test fun usbProfileUnchangedWhenNotLowLatency() {
+        val p = QualitySelector.profileFor(StreamQuality.BEST, 1, 1920, 1080, 30)
+        assertEquals(30_000_000, p.bitrateBps)
+        assertEquals(2, p.iFrameIntervalSec)
+    }
+
+    @Test fun overridesWinOverWifiScaling() {
+        val p = QualitySelector.profileFor(
+            StreamQuality.BEST, 1, 1920, 1080, 30,
+            bitrateOverrideBps = 10_000_000, gopOverrideSec = 3, lowLatency = true)
+        assertEquals(10_000_000, p.bitrateBps)
+        assertEquals(3, p.iFrameIntervalSec)
+    }
+
     @Test fun overridesAreHonoredWithinSanityBounds() {
         val p = QualitySelector.profileFor(
             StreamQuality.BEST, 0, 1920, 1080, 30,

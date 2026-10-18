@@ -7,14 +7,30 @@ let package = Package(
     products: [
         .library(name: "AndroidWebcamProtocol", targets: ["AndroidWebcamProtocol"]),
         .library(name: "AndroidWebcamCore", targets: ["AndroidWebcamCore"]),
-        .executable(name: "WAMC", targets: ["AndroidWebcamApp"]),
+        .library(name: "AndroidWebcamAppRuntime", targets: ["AndroidWebcamAppRuntime"]),
+        .executable(name: "WAMC", targets: ["WAMCLauncher"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
     ],
     targets: [
         .target(name: "AndroidWebcamProtocol"),
         .target(name: "AndroidWebcamCore", dependencies: ["AndroidWebcamProtocol"]),
-        .executableTarget(
-            name: "AndroidWebcamApp",
-            dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore"],
+        .target(
+            name: "CameraExtensionRuntime",
+            path: "CameraExtension",
+            exclude: ["README.md", "project.yml", "CameraExtension-Info.plist", "CameraExtension.entitlements"],
+            swiftSettings: [.define("WAMC_COVERAGE_TESTING")],
+            linkerSettings: [
+                .linkedFramework("CoreMediaIO"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
+            ]),
+        .target(
+            name: "AndroidWebcamAppRuntime",
+            dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore",
+                           .product(name: "Sparkle", package: "Sparkle")],
+            path: "Sources/AndroidWebcamApp",
             linkerSettings: [
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreMedia"),
@@ -22,7 +38,20 @@ let package = Package(
                 .linkedFramework("CoreMediaIO"),
                 .linkedFramework("AVFoundation"),
             ]),
+        .executableTarget(
+            name: "WAMCLauncher",
+            dependencies: ["AndroidWebcamAppRuntime"],
+            path: "Entrypoints",
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
+            ]),
+        .target(
+            name: "WAMCLauncherTestSupport",
+            dependencies: ["AndroidWebcamAppRuntime"],
+            path: "Tests/WAMCLauncherTestSupport",
+            swiftSettings: [.define("WAMC_COVERAGE_TESTING")]),
         .testTarget(name: "AndroidWebcamTests",
-                    dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore"]),
+                    dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore", "AndroidWebcamAppRuntime",
+                                   "CameraExtensionRuntime", "WAMCLauncherTestSupport"]),
     ]
 )

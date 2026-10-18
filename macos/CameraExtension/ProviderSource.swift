@@ -1,16 +1,29 @@
 import Foundation
 import CoreMediaIO
+import OSLog
 
 /// Shared latest frame handed from the sink stream to the source stream.
+/// Timestamped so the source publishes the waiting slate instead of a frozen
+/// frame when the phone stops delivering (restart, stall, unplug).
 final class SharedFrame {
     static let shared = SharedFrame()
     private let lock = NSLock()
+    private let now: () -> Date
     private var buffer: CVPixelBuffer?
+    private var storedAt = Date.distantPast
+
+    init(now: @escaping () -> Date = Date.init) { self.now = now }
+
     func store(_ pixelBuffer: CVPixelBuffer) {
-        lock.lock(); buffer = pixelBuffer; lock.unlock()
+        lock.lock(); buffer = pixelBuffer; storedAt = now(); lock.unlock()
     }
     func latest() -> CVPixelBuffer? {
         lock.lock(); defer { lock.unlock() }
+        return buffer
+    }
+    func latestFresh(within interval: TimeInterval) -> CVPixelBuffer? {
+        lock.lock(); defer { lock.unlock() }
+        guard let buffer, now().timeIntervalSince(storedAt) <= interval else { return nil }
         return buffer
     }
 }
@@ -36,7 +49,7 @@ final class ProviderSource: NSObject, CMIOExtensionProviderSource {
                 try device.addStream(stream)
             }
         } catch {
-            NSLog("AndroidCamera extension setup failed: \(error)")
+            ExtensionLogger.runtime.fault("Camera extension provider setup failed: \(error.localizedDescription, privacy: .private)")
         }
     }
 
