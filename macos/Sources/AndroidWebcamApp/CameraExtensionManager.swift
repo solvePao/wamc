@@ -2,14 +2,20 @@ import Foundation
 import AppKit
 import SystemExtensions
 import Combine
+import OSLog
 
 @MainActor
 protocol CameraExtensionServicing: AnyObject {
     var status: CameraExtensionManager.Status { get }
     var statusPublisher: AnyPublisher<CameraExtensionManager.Status, Never> { get }
     func activate()
+    func repair()
     func refreshStatus()
     func openSystemSettings()
+}
+
+extension CameraExtensionServicing {
+    func repair() { activate() }
 }
 
 struct CameraExtensionRequestState {
@@ -20,13 +26,13 @@ struct CameraExtensionRequestState {
     private(set) var propertiesPending = false
 
     mutating func beginActivation() -> Bool {
-        guard !activationPending else { return false }
+        guard !activationPending, !propertiesPending else { return false }
         activationPending = true
         return true
     }
 
     mutating func beginProperties(currentStatus: CameraExtensionManager.Status) -> Bool {
-        guard !propertiesPending, !activationPending, currentStatus != .requiresRestart else { return false }
+        guard !propertiesPending, !activationPending else { return false }
         propertiesPending = true
         return true
     }
@@ -92,11 +98,19 @@ final class CameraExtensionManager: NSObject, ObservableObject, OSSystemExtensio
         return .notInstalled
     }
 
-    @Published var status: Status = .unknown
+    @Published var status: Status = .unknown {
+        didSet {
+            guard oldValue != status else { return }
+            AppLogger.setup.info("Camera extension state: \(self.status.logName, privacy: .public)")
+        }
+    }
+    @Published private(set) var lastRequestError: String?
     var statusPublisher: AnyPublisher<Status, Never> { $status.eraseToAnyPublisher() }
     private var activationRequest: OSSystemExtensionRequest?
     private var propertiesRequest: OSSystemExtensionRequest?
     private var requestState = CameraExtensionRequestState()
+    private var activationAfterInspection = false
+    private var repairAfterInspection = false
 
     private let submitRequest: (OSSystemExtensionRequest) -> Void
     private let openURL: (URL) -> Void
@@ -109,7 +123,23 @@ final class CameraExtensionManager: NSObject, ObservableObject, OSSystemExtensio
     }
 
     func activate() {
+        inspectBeforeActivation(repair: false)
+    }
+
+    func repair() {
+        inspectBeforeActivation(repair: true)
+    }
+
+    private func inspectBeforeActivation(repair: Bool) {
+        guard !requestState.activationPending, status != .requiresRestart else { return }
+        activationAfterInspection = true
+        repairAfterInspection = repairAfterInspection || repair
+        refreshStatus()
+    }
+
+    private func submitActivation() {
         guard requestState.beginActivation() else { return }
+        lastRequestError = nil
         let request = OSSystemExtensionRequest.activationRequest(
             forExtensionWithIdentifier: Self.extensionBundleID,
             queue: .main
@@ -153,14 +183,31 @@ final class CameraExtensionManager: NSObject, ObservableObject, OSSystemExtensio
         case .activation: activationRequest = nil
         case .properties: propertiesRequest = nil
         }
-        status = requestState.fail(kind, message: message)
+        activationAfterInspection = false
+        repairAfterInspection = false
+        lastRequestError = message
+        let failureStatus = requestState.fail(kind, message: message)
+        if kind == .properties, status == .requiresRestart || status == .requiresApproval {
+            return
+        }
+        status = failureStatus
     }
 
     func resolveProperties(installed: Bool, enabled: Bool, awaitingApproval: Bool) {
         propertiesRequest = nil
+        lastRequestError = nil
         let resolvedStatus = requestState.propertiesFound(installed: installed, enabled: enabled,
                                                           awaitingApproval: awaitingApproval)
+        let shouldActivate = activationAfterInspection
+        let shouldRepair = repairAfterInspection
+        activationAfterInspection = false
+        repairAfterInspection = false
+        if status == .requiresRestart, !enabled { return }
+        if status == .requiresApproval, !installed, !enabled { return }
         if status != resolvedStatus { status = resolvedStatus }
+        if shouldActivate, !awaitingApproval, (!installed || shouldRepair) {
+            submitActivation()
+        }
     }
 
     func openSystemSettings() {
@@ -179,6 +226,7 @@ final class CameraExtensionManager: NSObject, ObservableObject, OSSystemExtensio
 
     nonisolated func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
         Task { @MainActor in
+            guard request === self.activationRequest else { return }
             self.status = .requiresApproval
         }
     }
@@ -186,6 +234,7 @@ final class CameraExtensionManager: NSObject, ObservableObject, OSSystemExtensio
     nonisolated func request(_ request: OSSystemExtensionRequest,
                              didFinishWithResult result: OSSystemExtensionRequest.Result) {
         Task { @MainActor in
+            guard request === self.activationRequest else { return }
             let completion: CameraExtensionRequestState.Completion
             switch result {
             case .completed: completion = .completed
@@ -199,19 +248,57 @@ final class CameraExtensionManager: NSObject, ObservableObject, OSSystemExtensio
     nonisolated func request(_ request: OSSystemExtensionRequest,
                              didFailWithError error: Error) {
         Task { @MainActor in
-            let kind: CameraExtensionRequestState.RequestKind =
-                request === self.propertiesRequest ? .properties : .activation
+            let kind: CameraExtensionRequestState.RequestKind
+            if request === self.propertiesRequest {
+                kind = .properties
+            } else if request === self.activationRequest {
+                kind = .activation
+            } else {
+                return
+            }
+            let nsError = error as NSError
+            AppLogger.setup.error("Camera extension request failed: domain=\(nsError.domain, privacy: .public) code=\(nsError.code, privacy: .public)")
             self.failRequest(kind, message: error.localizedDescription)
         }
     }
 
     nonisolated func request(_ request: OSSystemExtensionRequest,
                              foundProperties properties: [OSSystemExtensionProperties]) {
-        let current = properties.filter { !$0.isUninstalling }
         Task { @MainActor in
+            guard request === self.propertiesRequest else { return }
+            let current = properties.filter { property in
+                !property.isUninstalling && self.matchesBundledVersion(property)
+            }
             self.resolveProperties(installed: !current.isEmpty,
                                    enabled: current.contains { $0.isEnabled },
                                    awaitingApproval: current.contains { $0.isAwaitingUserApproval })
+        }
+    }
+
+    private func matchesBundledVersion(_ property: OSSystemExtensionProperties) -> Bool {
+        let extensionURL = Bundle.main.bundleURL.appendingPathComponent(
+            "Contents/Library/SystemExtensions/\(Self.extensionBundleID).systemextension")
+        guard let bundle = Bundle(url: extensionURL),
+              let version = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+              let shortVersion = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else {
+            // Command-line builds and test bundles do not embed a camera extension.
+            return true
+        }
+        return property.bundleVersion == version && property.bundleShortVersion == shortVersion
+    }
+}
+
+private extension CameraExtensionManager.Status {
+    var logName: String {
+        switch self {
+        case .unknown: return "unknown"
+        case .notInstalled: return "notInstalled"
+        case .activating: return "activating"
+        case .requiresApproval: return "requiresApproval"
+        case .disabled: return "disabled"
+        case .requiresRestart: return "requiresRestart"
+        case .active: return "active"
+        case .failed: return "failed"
         }
     }
 }

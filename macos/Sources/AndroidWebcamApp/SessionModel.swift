@@ -35,6 +35,9 @@ final class SessionModel: ObservableObject {
     private let connection: ConnectionController
     private var operation = UUID()
     private var explicitlySelected = false
+    private var availableUSB: [AndroidDevice] = []
+    private var trustedFallback: DiscoveredDevice?
+    private var lastTarget: ConnectionTarget?
 
     init(preferences: UserDefaults = .standard, connection: ConnectionController) {
         self.preferences = preferences
@@ -102,7 +105,30 @@ final class SessionModel: ObservableObject {
     }
 
     func connectionChanged(_ state: ConnectionState) {
+        if let target = state.target { lastTarget = target }
         if case .disconnected = state, !switching || connection.failureMessage != nil {
+            let failedUSB: Bool
+            if case .usb = lastTarget { failedUSB = true } else { failedUSB = false }
+            if wantsStreaming, startsAutomatically, !connection.automaticConnectionSuppressed,
+               failedUSB, !connection.identityMismatch, connection.failureMessage != nil,
+               let phone = trustedFallback, isTrusted?(phone) == true,
+               connection.canAutomaticallyConnect(to: .wifi(phone)) {
+                // Defer until AppModel finishes clearing the old feed generation.
+                operation = UUID()
+                let token = operation
+                switching = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.operation == token, self.wantsStreaming else { return }
+                    guard self.isTrusted?(phone) == true else {
+                        self.switching = false
+                        self.wantsStreaming = false
+                        return
+                    }
+                    self.selectedSource = .wifi(phone)
+                    self.connectSelection(manual: false)
+                }
+                return
+            }
             switching = false
             wantsStreaming = false
         }
@@ -111,8 +137,12 @@ final class SessionModel: ObservableObject {
     /// Discovery selects an initial source, then shares the same Start path as
     /// the main button. A selected source is never silently replaced by polling.
     func discovered(usb: [AndroidDevice], wifi: [DiscoveredDevice]) {
-        let cable = usb.first(where: { $0.state == "device" }).map { ConnectionTarget.usb(serial: $0.id) }
+        availableUSB = usb
+        let cable = usb.first(where: {
+            $0.state == "device" && connection.canAutomaticallyConnect(to: .usb(serial: $0.id))
+        }).map { ConnectionTarget.usb(serial: $0.id) }
         let trustedPhone = wifi.first(where: { isTrusted?($0) == true }).map(ConnectionTarget.wifi)
+        trustedFallback = wifi.first(where: { isTrusted?($0) == true })
         if !explicitlySelected {
             let preferred: ConnectionTarget = cable == nil ? (trustedPhone ?? .usb(serial: nil)) : .usb(serial: nil)
             if !wantsStreaming && connection.state == .disconnected {
@@ -125,7 +155,8 @@ final class SessionModel: ObservableObject {
               connection.canAutomaticallyConnect(to: selectedSource.transport == .usb ? (cable ?? selectedSource) : selectedSource) else { return }
         let available: Bool
         switch selectedSource {
-        case .usb(let serial): available = usb.contains { $0.state == "device" && (serial == nil || $0.id == serial) }
+        case .usb(let serial): available = cable != nil && usb.contains { $0.state == "device" && (serial == nil || $0.id == serial) }
+        case .adb: available = false
         case .wifi(let phone): available = isTrusted?(phone) == true && wifi.contains { $0.id == phone.id }
         case .address: available = false
         }
@@ -154,7 +185,7 @@ final class SessionModel: ObservableObject {
             case .starting: status = "Starting camera…"
             case .updating: status = "Applying quality…"
             case .stalled: status = "No feed. Check the phone or stop and start again."
-            default: status = "Streaming over \(selectedSource.transport == .usb ? "USB" : "Wi-Fi")"
+            default: status = "Streaming over \(selectedSource.label)"
             }
             return .init(action: .stop, title: "Stop stream", status: status, sourceLabel: sourceLabel,
                          symbol: "stop.fill", isProgress: feed == .starting || feed == .updating)
@@ -175,13 +206,14 @@ final class SessionModel: ObservableObject {
     func isSelected(_ source: ConnectionTarget) -> Bool { sameSource(source, selectedSource) }
 
     private func sameSource(_ lhs: ConnectionTarget, _ rhs: ConnectionTarget) -> Bool {
-        if lhs.transport == .usb && rhs.transport == .usb { return true }
+        if case .usb = lhs, case .usb = rhs { return true }
+        if case .adb = lhs, case .adb = rhs { return true }
         return lhs.key == rhs.key
     }
 
     private func commitSelection(_ source: ConnectionTarget, explicit: Bool) {
         connection.clearFailure()
-        selectedSource = source.transport == .usb ? .usb(serial: nil) : source
+        selectedSource = source
         explicitlySelected = explicitlySelected || explicit
         if wantsStreaming { switchSelection(manual: explicit) }
     }
@@ -200,7 +232,14 @@ final class SessionModel: ObservableObject {
         let endpoint: NWEndpoint?
         if case .wifi(let phone) = selectedSource { endpoint = endpointForDevice?(phone) }
         else { endpoint = nil }
-        connection.connect(to: selectedSource, endpoint: endpoint, manual: manual)
+        let target: ConnectionTarget
+        if case .usb(nil) = selectedSource,
+           let phone = availableUSB.first(where: {
+               $0.state == "device" && (manual || connection.canAutomaticallyConnect(to: .usb(serial: $0.id)))
+           }) {
+            target = .usb(serial: phone.id)
+        } else { target = selectedSource }
+        connection.connect(to: target, endpoint: endpoint, manual: manual)
         // A missing endpoint can fail synchronously, before a HELLO is possible.
         if connection.state == .disconnected {
             switching = false

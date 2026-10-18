@@ -78,3 +78,19 @@ Open for later: public Developer ID distribution/notarization, 60 FPS/4K, other 
 - Android uses a permanent release key and native installer approval. Mac uses arm64 Developer ID signing, notarization, and Sparkle signed updates.
 - Check once per process launch, prompt before download, and defer installation during streaming. Manual update checks remain available.
 - Retain 90% coverage gates; focused updater tests were explicitly authorized.
+
+
+## ADB-free consumer transport — 2026-10-19
+
+- Consumer USB uses Android Open Accessory with bundled libusb 1.0.30 and the
+  existing AWC1 stream. Samsung/Mac remains the initial hardware scope; wired
+  release support requires real debugging-disabled and signed-app validation.
+- ADB remains available only through explicit Developer tools opt-in and source
+  selection. It is not installed, probed or launched by ordinary consumer setup.
+- AOA setup is bounded to 30 seconds; network connection deadlines and Stop
+  behavior remain separate. No privileged USB helper or driver is introduced.
+- USB failure can select currently trusted Wi-Fi only when automatic streaming
+  remains enabled. Explicit Stop/Cancel suppress restart. Manual addresses may
+  use compatible tethering; automatic tether discovery is deferred.
+- Accessory permission, matching identity, detach/reattach and buffered USB reads
+  are Android transport responsibilities. Camera and codec behavior are shared.

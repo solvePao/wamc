@@ -159,6 +159,14 @@ final class SetupModel: ObservableObject {
     @Published private(set) var sinkRegistered = false
     @Published private(set) var operationError: String?
     @Published private(set) var installing = false
+    var hasVerifiedVideo: () -> Bool = { false }
+    var onRegistrationAvailable: (() -> Void)?
+
+    var canFinish: Bool {
+        installed && packageIssue == nil && sinkRegistered
+            && extensionService.status == .active && hasVerifiedVideo()
+    }
+
     private var observation: AnyCancellable?
     private var refreshTimer: Timer?
     private let environment: SetupEnvironment
@@ -207,7 +215,10 @@ final class SetupModel: ObservableObject {
         let authorization = environment.cameraAuthorization()
         if cameraAuthorization != authorization { cameraAuthorization = authorization }
         let registered = environment.sinkIsRegistered()
-        if sinkRegistered != registered { sinkRegistered = registered }
+        if sinkRegistered != registered {
+            sinkRegistered = registered
+            if registered { onRegistrationAvailable?() }
+        }
         if installed, packageIssue == nil { extensionService.refreshStatus() }
     }
 
@@ -233,13 +244,17 @@ final class SetupModel: ObservableObject {
         }
     }
 
+    func repairCamera() {
+        guard installed, packageIssue == nil else { return }
+        extensionService.repair()
+    }
+
     func openPrivacy(_ pane: String) {
         environment.openPrivacyPane(pane)
     }
 
     func finish() {
-        guard installed, packageIssue == nil, sinkRegistered,
-              extensionService.status == .active else { return }
+        guard canFinish else { return }
         preferences.set(Self.version, forKey: "wamc.setupVersion")
         showSetup = false
     }

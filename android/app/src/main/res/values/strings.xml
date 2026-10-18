@@ -10,8 +10,8 @@
     <string name="wifi_discovery">Wi-Fi discovery</string>
     <string name="channel_name">Camera streaming</string>
     <string name="usb_setup_title">Connect over USB</string>
-    <string name="usb_setup_desc">Set USB to File transfer for easier connection.</string>
-    <string name="usb_setup_action">Configure USB</string>
+    <string name="usb_setup_desc">Connect a USB data cable, open WAMC on your Mac and approve accessory access. If USB is unavailable, use the same Wi-Fi or a phone hotspot.</string>
+    <string name="usb_setup_action">USB connection help</string>
     <string name="usb_setup_dismiss">Dismiss</string>
     <string name="usb_setup_configured_root">Default USB configuration set to File Transfer (MTP) via root.</string>
     <string name="usb_dev_options_hint">In Developer Options, tap \'Default USB configuration\' and select \'Transferring files / Android Auto\'.</string>

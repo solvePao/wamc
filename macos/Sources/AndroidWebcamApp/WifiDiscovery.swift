@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import dnssd
 import AndroidWebcamCore
 
 struct WifiAdvertisement {
@@ -14,6 +15,26 @@ struct WifiAdvertisement {
 /// auto-renamed on conflict). The `NWEndpoint` for each device is kept
 /// here so `StreamReceiver` can connect without touching an IP address.
 final class WifiDiscovery: ObservableObject {
+    enum LifecycleState: Equatable {
+        case off
+        case searching
+        case ready
+        case waiting(String)
+        case failed(String)
+        case accessDenied(String)
+
+        fileprivate var logName: String {
+            switch self {
+            case .off: return "off"
+            case .searching: return "searching"
+            case .ready: return "ready"
+            case .waiting: return "waiting"
+            case .failed: return "failed"
+            case .accessDenied: return "accessDenied"
+            }
+        }
+    }
+
     enum BrowserStatus {
         case ready
         case failed(String)
@@ -23,6 +44,7 @@ final class WifiDiscovery: ObservableObject {
 
     @Published private(set) var devices: [DiscoveredDevice] = []
     @Published private(set) var statusText = "Wi-Fi discovery off"
+    @Published private(set) var lifecycleState: LifecycleState = .off
 
     /// Fired on the main queue whenever the device set changes.
     var onDevicesChanged: (([DiscoveredDevice]) -> Void)?
@@ -49,14 +71,18 @@ final class WifiDiscovery: ObservableObject {
             for: .bonjourWithTXTRecord(type: WamcDiscovery.serviceType, domain: nil),
             using: .tcp)
         self.browser = browser
-        statusText = "Searching for phones on Wi-Fi…"
+        updateLifecycle(.searching)
         browser.stateUpdateHandler = { [weak self, weak browser] state in
             DispatchQueue.main.async {
                 guard let self, let browser, self.browser === browser else { return }
                 switch state {
                 case .ready: self.applyBrowserStatus(.ready)
-                case .failed(let error): self.applyBrowserStatus(.failed(error.localizedDescription))
-                case .waiting(let error): self.applyBrowserStatus(.waiting(error.localizedDescription))
+                case .failed(let error):
+                    self.logBrowserError(error)
+                    self.applyBrowserError(error, waiting: false)
+                case .waiting(let error):
+                    self.logBrowserError(error)
+                    self.applyBrowserError(error, waiting: true)
                 default: self.applyBrowserStatus(.other)
                 }
             }
@@ -80,6 +106,20 @@ final class WifiDiscovery: ObservableObject {
         startBrowser(browser, queue)
     }
 
+    /// Replace the browser without discarding endpoints used by an active session.
+    func refresh(recoverOnly: Bool = false) {
+        if recoverOnly, browser != nil {
+            switch lifecycleState {
+            case .searching, .ready: return
+            case .off, .waiting, .failed, .accessDenied: break
+            }
+        }
+        let previousBrowser = browser
+        browser = nil
+        previousBrowser?.cancel()
+        start()
+    }
+
     func apply(_ advertisements: [WifiAdvertisement]) {
         var parsed: [DiscoveredDevice] = []
         var endpoints: [String: NWEndpoint] = [:]
@@ -98,22 +138,56 @@ final class WifiDiscovery: ObservableObject {
         parsed.sort { $0.displayName < $1.displayName }
         devices = parsed
         endpointsById = endpoints
-        statusText = parsed.isEmpty
-            ? "No phones found on this Wi-Fi network yet"
-            : "Found \(parsed.count) phone(s) on Wi-Fi"
+        updateLifecycle(.ready)
         onDevicesChanged?(parsed)
     }
 
     func applyBrowserStatus(_ status: BrowserStatus) {
         switch status {
+        case .ready: updateLifecycle(.ready)
+        case .failed(let message): updateLifecycle(.failed(message))
+        case .waiting(let message): updateLifecycle(.waiting(message))
+        case .other: break
+        }
+    }
+
+    private func updateLifecycle(_ state: LifecycleState) {
+        if lifecycleState != state {
+            AppLogger.discovery.info("Wi-Fi discovery state: \(state.logName, privacy: .public)")
+        }
+        lifecycleState = state
+        switch state {
+        case .off: statusText = "Wi-Fi discovery off"
+        case .searching: statusText = "Searching for phones on Wi-Fi…"
         case .ready:
             statusText = devices.isEmpty
                 ? "No phones found on this Wi-Fi network yet"
                 : "Found \(devices.count) phone(s) on Wi-Fi"
         case .failed(let message): statusText = "Wi-Fi discovery failed: \(message)"
         case .waiting(let message): statusText = "Wi-Fi discovery waiting: \(message)"
-        case .other: break
+        case .accessDenied(let message):
+            statusText = "Local Network access is unavailable. Allow WAMC in System Settings → Privacy & Security → Local Network, then refresh. \(message)"
         }
+    }
+
+    private func applyBrowserError(_ error: NWError, waiting: Bool) {
+        if case .dns(let code) = error, code == kDNSServiceErr_PolicyDenied || code == kDNSServiceErr_NotPermitted {
+            updateLifecycle(.accessDenied(error.localizedDescription))
+        } else {
+            applyBrowserStatus(waiting ? .waiting(error.localizedDescription) : .failed(error.localizedDescription))
+        }
+    }
+
+    private func logBrowserError(_ error: NWError) {
+        // Network error domains and numeric codes contain no phone identity/address.
+        let code: String
+        switch error {
+        case .posix(let value): code = "posix:\(value.rawValue)"
+        case .dns(let value): code = "dns:\(value)"
+        case .tls(let value): code = "tls:\(value)"
+        default: code = "unknown"
+        }
+        AppLogger.discovery.warning("Wi-Fi discovery error \(code, privacy: .public): \(error.localizedDescription, privacy: .private)")
     }
 
     func stop() {
@@ -122,7 +196,7 @@ final class WifiDiscovery: ObservableObject {
         stoppedBrowser?.cancel()
         devices = []
         endpointsById = [:]
-        statusText = "Wi-Fi discovery off"
+        updateLifecycle(.off)
     }
 }
 

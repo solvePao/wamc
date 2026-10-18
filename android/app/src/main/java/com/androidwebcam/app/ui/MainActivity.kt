@@ -3,7 +3,6 @@ package com.androidwebcam.app.ui
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
@@ -15,7 +14,6 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
-import android.provider.Settings
 import android.widget.Toast
 import android.view.Surface
 import android.view.TextureView
@@ -37,7 +35,7 @@ import com.androidwebcam.app.util.UsbConfigHelper
 
 class MainActivity : Activity() {
 
-    internal var configureUsb: () -> Boolean = UsbConfigHelper::tryConfigureViaRoot
+    internal var configureUsb: () -> Boolean = { false }
     internal var launchUsbSettings: (Intent) -> Unit = { startActivity(it) }
     internal var updateCoordinator: () -> com.androidwebcam.app.update.UpdateCoordinator = {
         com.androidwebcam.app.update.AndroidUpdates.get(this)
@@ -210,6 +208,12 @@ class MainActivity : Activity() {
         // the service restarts sticky; streaming itself still needs a trigger.
         startForegroundService(Intent(this, CameraStreamingService::class.java))
         bindService(Intent(this, CameraStreamingService::class.java), connection, BIND_AUTO_CREATE)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) service?.connectAccessory()
     }
 
     private fun autoStartEnabled(): Boolean =
@@ -431,32 +435,13 @@ class MainActivity : Activity() {
             return
         }
 
-        // If device is rooted, attempt silent configuration and dismiss
-        if (configureUsb()) {
-            UsbConfigHelper.setSetupDismissed(this, true)
-            Toast.makeText(this, R.string.usb_setup_configured_root, Toast.LENGTH_LONG).show()
-            usbSetupCard.visibility = View.GONE
-            return
-        }
-
         usbSetupCard.visibility = View.VISIBLE
-
         btnConfigureUsb.setOnClickListener {
-            if (UsbConfigHelper.isDeveloperOptionsEnabled(this)) {
-                Toast.makeText(this, R.string.usb_dev_options_hint, Toast.LENGTH_LONG).show()
-                try {
-                    launchUsbSettings(UsbConfigHelper.createDeveloperOptionsIntent())
-                } catch (_: ActivityNotFoundException) {
-                    launchUsbSettings(Intent(Settings.ACTION_SETTINGS))
-                }
-            } else {
-                Toast.makeText(this, R.string.usb_enable_dev_options_hint, Toast.LENGTH_LONG).show()
-                try {
-                    launchUsbSettings(UsbConfigHelper.createAboutPhoneIntent())
-                } catch (_: ActivityNotFoundException) {
-                    launchUsbSettings(Intent(Settings.ACTION_SETTINGS))
-                }
-            }
+            service?.connectAccessory()
+            Toast.makeText(this,
+                "Connect a USB data cable, open WAMC on your Mac, and allow the accessory prompt. " +
+                    "If USB is unavailable, connect both devices to Wi-Fi or a phone hotspot.",
+                Toast.LENGTH_LONG).show()
         }
 
         btnDismissUsbSetup.setOnClickListener {

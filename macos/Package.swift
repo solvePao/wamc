@@ -14,6 +14,14 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
     ],
     targets: [
+        .target(name: "CLibusb", path: "Vendor/libusb", exclude: ["COPYING", "README.md"],
+                sources: ["core.c", "descriptor.c", "hotplug.c", "io.c", "strerror.c", "sync.c",
+                          "os/darwin_usb.c", "os/events_posix.c", "os/threads_posix.c"],
+                publicHeadersPath: "include",
+                cSettings: [.headerSearchPath("."), .headerSearchPath("os")],
+                linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation"),
+                                 .linkedFramework("Security")]),
+        .target(name: "AccessoryUSB", dependencies: ["CLibusb"]),
         .target(name: "AndroidWebcamProtocol"),
         .target(name: "AndroidWebcamCore", dependencies: ["AndroidWebcamProtocol"]),
         .target(
@@ -29,7 +37,7 @@ let package = Package(
             ]),
         .target(
             name: "AndroidWebcamAppRuntime",
-            dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore",
+            dependencies: ["AndroidWebcamProtocol", "AndroidWebcamCore", "AccessoryUSB",
                            .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/AndroidWebcamApp",
             linkerSettings: [

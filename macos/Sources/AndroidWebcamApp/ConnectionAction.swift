@@ -17,8 +17,9 @@ extension AppModel {
         case .usb(let serial):
             let phone = devices.first(where: { serial == nil || $0.id == serial })?.model
             sourceLabel = phone.map { "\($0) · USB" } ?? "USB"
+        case .adb: sourceLabel = "ADB · Development"
         case .wifi(let phone): sourceLabel = "\(phone.displayName) · Wi-Fi"
-        case .address(let host, let port): sourceLabel = "\(host):\(port) · Wi-Fi"
+        case .address(let host, let port): sourceLabel = "\(host):\(port) · Network"
         }
         return session.snapshot(feed: feedState, sourceLabel: sourceLabel)
     }
@@ -33,7 +34,8 @@ extension AppModel {
 
     func isSourceActive(_ target: ConnectionTarget) -> Bool {
         guard connected, let active = connectionState.target else { return false }
-        if target.transport == .usb { return active.transport == .usb }
+        if case .usb = target, case .usb = active { return true }
+        if case .adb = target, case .adb = active { return true }
         return active.key == target.key
     }
 
