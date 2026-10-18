@@ -319,7 +319,7 @@ final class AppModelTests: XCTestCase {
         connection.connect(to: .address("127.0.0.1", 27183), manual: true)
         let attempt = try XCTUnwrap(transport.attempt)
         transport.emit(.hello(["model": "Phone"]), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await waitUntil("HELLO establishes the connection") { model.connected }
         model.sendStart()
         let config = WireProtocol.ConfigV2(codec: WireProtocol.codecAVC,
             paramSets: [Data([0x67]), Data([0x68])], width: 1920, height: 1080, fps: 30, rotation: 0)
@@ -328,12 +328,12 @@ final class AppModelTests: XCTestCase {
         for pts in 0..<122 {
             transport.emit(.video(Data([0, 0, 1, 0x65]), Int64(pts), pts == 0), attempt: attempt)
         }
-        try await Task.sleep(nanoseconds: 30_000_000)
+        try await waitUntil("All video frames reach the decoder") { decoder.decodeCount == 122 }
         XCTAssertEqual(decoder.configuredContexts.count, 1, "Duplicate configurations must not reset decoding")
         XCTAssertEqual(decoder.decodeCount, 122)
         let context = try XCTUnwrap(decoder.configuredContexts.last)
         decoder.emitFrame(try makePixelBuffer(), ptsUs: 121, context: context)
-        try await Task.sleep(nanoseconds: 30_000_000)
+        try await waitUntil("Decoded frame starts the live feed") { model.feedState == .live }
         XCTAssertEqual(model.feedState, .live)
         XCTAssertEqual(model.stats.decodeErrors, 0)
         XCTAssertFalse(model.virtualCameraSendingFrames,
@@ -341,22 +341,26 @@ final class AppModelTests: XCTestCase {
 
         model.setQuality(.high)
         model.setQuality(.balanced)
-        try await Task.sleep(nanoseconds: 300_000_000)
+        try await waitUntil("Debounced quality sends the latest profile") {
+            model.feedState == .updating && transport.sentControls.filter { $0.first?.1 == "start" }.count == 2
+        }
         XCTAssertEqual(model.feedState, .updating)
         let starts = transport.sentControls.filter { $0.first?.1 == "start" }
         XCTAssertEqual(starts.count, 2)
         XCTAssertEqual(Dictionary(uniqueKeysWithValues: try XCTUnwrap(starts.last))["quality"], "balanced")
         transport.emit(.configV2(config), attempt: attempt)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        try await waitUntil("Updated profile configures a new decoder context") { decoder.configuredContexts.count == 2 }
         let updated = try XCTUnwrap(decoder.configuredContexts.last)
         decoder.emitFrame(try makePixelBuffer(), ptsUs: 123, context: updated)
-        try await Task.sleep(nanoseconds: 30_000_000)
+        try await waitUntil("Updated frame restores the live feed") { model.feedState == .live }
         XCTAssertEqual(model.feedState, .live)
         XCTAssertEqual(model.qualityMode, .balanced)
         connection.disconnect()
         decoder.emitFrame(try makePixelBuffer(), ptsUs: 124, context: updated)
         decoder.emitError(context: updated)
-        try await Task.sleep(nanoseconds: 20_000_000)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
         XCTAssertEqual(model.feedState, .idle)
         XCTAssertEqual(model.stats.decodeErrors, 0)
     }
@@ -385,6 +389,19 @@ final class AppModelTests: XCTestCase {
         model.wifiDiscovery.apply([])
         try await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertTrue(model.discoveredDevices.isEmpty)
+    }
+
+    private func waitUntil(_ description: String, timeout: TimeInterval = 3,
+                           condition: () -> Bool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(timeout))
+        while !condition() {
+            guard clock.now < deadline else {
+                XCTFail(description)
+                throw NSError(domain: "AppModelTests.waitUntil", code: 1)
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 
     private func makePixelBuffer() throws -> CVPixelBuffer {
