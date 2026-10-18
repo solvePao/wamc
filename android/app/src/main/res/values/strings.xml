@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WAMC</string>
+    <string name="start_streaming">Start Streaming</string>
+    <string name="stop_streaming">Stop Streaming</string>
+    <string name="switch_camera">Switch Camera</string>
+    <string name="rotate">Rotate 90°</string>
+    <string name="enhance_filter">Enhance · sharpness + denoise</string>
+    <string name="channel_name">Camera streaming</string>
+    <string name="usb_setup_title">Default USB Configuration</string>
+    <string name="usb_setup_desc">Set default USB mode to \'Transferring files / Android Auto\' for seamless connection when plugged into Mac.</string>
+    <string name="usb_setup_action">Configure USB</string>
+    <string name="usb_setup_dismiss">Dismiss</string>
+    <string name="usb_setup_configured_root">Default USB configuration set to File Transfer (MTP) via root.</string>
+    <string name="usb_dev_options_hint">In Developer Options, tap \'Default USB configuration\' and select \'Transferring files / Android Auto\'.</string>
+    <string name="usb_enable_dev_options_hint">Tap \'Build number\' 7 times in About Phone to enable Developer Options first.</string>
+</resources>

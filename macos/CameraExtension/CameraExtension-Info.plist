@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Android Camera</string>
+	<key>CFBundleExecutable</key>
+	<string>CameraExtension</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.androidwebcam.app.CameraExtension</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Android Camera Extension</string>
+	<key>CFBundlePackageType</key>
+	<string>SYSX</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>CMIOExtension</key>
+	<dict>
+		<key>CMIOExtensionMachServiceName</key>
+		<string>FJ696ZCQ56.com.androidwebcam.app.CameraExtension</string>
+	</dict>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Enables Android Camera as a virtual webcam in macOS.</string>
+</dict>
+</plist>

@@ -1,0 +1,17 @@
+name: AndroidWebcamExtension
+options:
+  bundleIdPrefix: com.androidwebcam
+targets:
+  CameraExtension:
+    type: system-extension
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - ExtensionMain.swift
+      - ProviderSource.swift
+      - DeviceSource.swift
+      - StreamSources.swift
+    settings:
+      INFOPLIST_FILE: CameraExtension-Info.plist
+      CODE_SIGN_ENTITLEMENTS: CameraExtension.entitlements
+      PRODUCT_BUNDLE_IDENTIFIER: com.androidwebcam.app.CameraExtension

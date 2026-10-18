@@ -1,0 +1,13 @@
+.build/
+build/
+.gradle/
+local.properties
+*.apk
+DerivedData/
+xcuserdata/
+_probe*.txt
+_sdksetup.txt
+_ls.txt
+.vscode/
+*.dmg
+*.log
