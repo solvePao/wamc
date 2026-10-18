@@ -163,54 +163,52 @@ final class ExtensionBridge {
     }
 }
 
+/// Native stream operations stay at one boundary so queue ownership is testable.
+struct CoreMediaIOStreamAccess {
+    var copyQueue = CMIOStreamCopyBufferQueue
+    var start = CMIODeviceStartStream
+    var stop = CMIODeviceStopStream
+    var enqueue = CMSimpleQueueEnqueue
+}
+
 /// CoreMediaIO owns the system stream and queue; the bridge owns retry policy.
-private final class CoreMediaIOExtensionSink: ExtensionFrameSink {
+final class CoreMediaIOExtensionSink: ExtensionFrameSink {
+    private let reader: CoreMediaIOPropertyReading
+    private let streams: CoreMediaIOStreamAccess
     private var bufferQueue: CMSimpleQueue?
     private var sinkDevice: CMIOObjectID?
     private var sinkStream: CMIOStreamID?
     private(set) var available = false
     private(set) var connectedStreamName: String?
 
+    init(reader: CoreMediaIOPropertyReading = CoreMediaIOSystemPropertyReader(),
+         streams: CoreMediaIOStreamAccess = CoreMediaIOStreamAccess()) {
+        self.reader = reader
+        self.streams = streams
+    }
+
     func discover() {
+        guard !available else { return }
         // Enumerate CMIO devices -> streams; only sink streams hand out a
         // buffer queue via CMIOStreamCopyBufferQueue, so success = found.
-        var address = CMIOObjectPropertyAddress(
-            mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyDevices),
-            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
-            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
-        var size: UInt32 = 0
-        guard CMIOObjectGetPropertyDataSize(
-            CMIOObjectID(kCMIOObjectSystemObject), &address, 0, nil, &size) == noErr,
-              size > 0 else { return }
-        var devices = [CMIOObjectID](repeating: 0, count: Int(size) / MemoryLayout<CMIOObjectID>.size)
-        guard CMIOObjectGetPropertyData(
-            CMIOObjectID(kCMIOObjectSystemObject), &address, 0, nil, size,
-            &size, &devices) == noErr else { return }
+        guard let devices = try? reader.objects(for: UInt32(kCMIOObjectSystemObject),
+                                               selector: UInt32(kCMIOHardwarePropertyDevices)) else { return }
         for device in devices {
-            var streamAddress = CMIOObjectPropertyAddress(
-                mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyStreams),
-                mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
-                mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
-            var streamSize: UInt32 = 0
-            guard CMIOObjectGetPropertyDataSize(device, &streamAddress, 0, nil, &streamSize) == noErr,
-                  streamSize > 0 else { continue }
-            var streams = [CMIOObjectID](repeating: 0,
-                                         count: Int(streamSize) / MemoryLayout<CMIOObjectID>.size)
-            guard CMIOObjectGetPropertyData(device, &streamAddress, 0, nil, streamSize,
-                                            &streamSize, &streams) == noErr else { continue }
-            for stream in streams {
+            guard let streamIDs = try? reader.objects(for: device,
+                                                      selector: UInt32(kCMIODevicePropertyStreams)) else { continue }
+            for stream in streamIDs {
                 // Only our own extension's sink may take the feed. Another
                 // virtual camera's sink (e.g. OBS) also matches "sink" and
                 // would steal every frame, leaving FaceTime on the slate.
-                guard let name = streamName(stream),
+                guard let name = try? reader.string(for: stream, selector: UInt32(kCMIOObjectPropertyName)),
                       name.localizedCaseInsensitiveContains("sink"),
                       name.localizedCaseInsensitiveContains("Android Camera") else { continue }
                 let queueAlteredProc: CMIODeviceStreamQueueAlteredProc = { (_, _, _) in }
                 var unmanaged: Unmanaged<CMSimpleQueue>?
-                if CMIOStreamCopyBufferQueue(CMIOStreamID(stream), queueAlteredProc, nil, &unmanaged) == noErr,
+                if streams.copyQueue(CMIOStreamID(stream), queueAlteredProc, nil, &unmanaged) == noErr,
                    let unmanaged {
                     let queue = unmanaged.takeRetainedValue()
-                    guard CMIODeviceStartStream(device, stream) == noErr else { continue }
+                    guard streams.start(device, stream) == noErr else { continue }
                     bufferQueue = queue
                     sinkDevice = device
                     sinkStream = stream
@@ -222,29 +220,13 @@ private final class CoreMediaIOExtensionSink: ExtensionFrameSink {
         }
     }
 
-    private func streamName(_ stream: CMIOObjectID) -> String? {
-        var address = CMIOObjectPropertyAddress(
-            mSelector: CMIOObjectPropertySelector(kCMIOObjectPropertyName),
-            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
-            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
-        var size: UInt32 = 0
-        guard CMIOObjectGetPropertyDataSize(stream, &address, 0, nil, &size) == noErr,
-              size > 0 else { return nil }
-        var value: Unmanaged<CFString>?
-        guard CMIOObjectGetPropertyData(stream, &address, 0, nil,
-                                        UInt32(MemoryLayout<CFString>.size),
-                                        &size, &value) == noErr,
-              let value else { return nil }
-        return value.takeRetainedValue() as String
-    }
-
     func enqueue(_ sample: CMSampleBuffer) -> ExtensionSinkEnqueueResult {
         guard available, let bufferQueue else { return .unavailable }
         guard CMSimpleQueueGetCount(bufferQueue) < CMSimpleQueueGetCapacity(bufferQueue) else {
             return .full
         }
         let retained = Unmanaged.passRetained(sample)
-        if CMSimpleQueueEnqueue(bufferQueue, element: retained.toOpaque()) != noErr {
+        if streams.enqueue(bufferQueue, retained.toOpaque()) != noErr {
             retained.release()
             return .failed
         }
@@ -253,7 +235,7 @@ private final class CoreMediaIOExtensionSink: ExtensionFrameSink {
 
     func disconnect() {
         if let sinkDevice, let sinkStream {
-            _ = CMIODeviceStopStream(sinkDevice, sinkStream)
+            _ = streams.stop(sinkDevice, sinkStream)
         }
         bufferQueue = nil
         sinkDevice = nil

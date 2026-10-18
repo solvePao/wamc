@@ -326,6 +326,40 @@ class MainActivityLifecycleTest {
         controller.destroy()
     }
 
+    @Test fun installationBlocksDirectRemoteAndPendingServiceStarts() {
+        val application = RuntimeEnvironment.getApplication()
+        val updater = com.androidwebcam.app.update.AndroidUpdates.get(application)
+        val controller = Robolectric.buildService(CameraStreamingService::class.java)
+        val service = controller.create().get()
+        try {
+            // A hidden start normally queues until the activity resumes.
+            assertFalse(service.startStreaming(640, 480))
+            updater.installationResult("Pending installation", finished = false)
+            service.setActivityVisible(true)
+            assertFalse(service.startPendingRequest())
+            assertFalse(service.streaming)
+            assertFalse(service.hasCameraError)
+            assertFalse(service.startStreaming(640, 480))
+            service.handleControl(mapOf("cmd" to "start"))
+            assertFalse(service.streaming)
+            assertFalse(service.hasCameraError)
+            service.setActivityVisible(false)
+            service.handleControl(mapOf("cmd" to "start"))
+            updater.installationResult("Installation cancelled")
+            // Installation-blocked starts must not become a stale queued start.
+            service.setActivityVisible(true)
+            assertFalse(service.startPendingRequest())
+            assertFalse(service.hasCameraError)
+            // Outside installation, hidden starts retain their existing queue behavior.
+            service.setActivityVisible(false)
+            service.handleControl(mapOf("cmd" to "start"))
+            assertTrue(service.currentStatus().contains("Open WAMC"))
+        } finally {
+            updater.installationResult("Finished")
+            controller.destroy()
+        }
+    }
+
     @Test fun serviceWithoutCameraPermissionContainsForegroundStartDenial() {
         val application = RuntimeEnvironment.getApplication()
         shadowOf(application).denyPermissions(Manifest.permission.CAMERA)

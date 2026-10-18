@@ -88,6 +88,11 @@ def enforce_coverage(report: dict) -> bool:
     # a test-support target. The support copy has the same launcher body and
     # compiles with WAMC_COVERAGE_TESTING to suppress only the @main attribute.
     for source, support_source in SOURCE_ALIASES.items():
+        def launcher_body(path):
+            return "\n".join(line for line in path.read_text().splitlines()
+                             if not line.startswith("#sourceLocation"))
+        if launcher_body(source) != launcher_body(support_source):
+            raise ValueError("Coverage launcher copy differs from the production launcher")
         if source in expected and source not in files and support_source in files:
             files[source] = files[support_source]
     measured = expected.intersection(files)

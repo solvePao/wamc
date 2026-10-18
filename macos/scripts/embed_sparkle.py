@@ -20,7 +20,7 @@ def embed(app):
               if not path.is_symlink() and (path.suffix in ('.xpc', '.app') or path.name == 'Autoupdate')]
     for path in sorted(nested, key=lambda path: len(path.parts), reverse=True) + [destination]:
         subprocess.run(['codesign', '--force', '--sign', os.environ['SIGN_IDENTITY'],
-                        '--options', 'runtime', '--timestamp', str(path)], check=True)
+                        '--options', 'runtime', '--timestamp', '--preserve-metadata=entitlements', str(path)], check=True)
 
 
 

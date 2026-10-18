@@ -69,3 +69,7 @@ Existing apps need one manual installation to gain updater support. Android debu
 Both apps check once per launch and prompt before download. Manual checks remain available. Installations wait until streaming stops. Android requests native installation permission/approval; macOS may request permission for replacement or extension activation.
 
 Validate an upgrade between two signed builds on a physical Android phone and Mac. Verify preserved settings, USB/Wi-Fi streams, camera extension readiness, checksum rejection, cancellation, and streaming deferral. Confirm public assets and feed are accessible anonymously.
+
+## Configured publisher credential
+
+The repository-restricted WAMC release publisher token expires on November 17, 2026. Rotate `RELEASE_PUBLISH_TOKEN` in the release environment before that date. Its scope is `solvePao/wamc-releases` only, Contents read/write plus required Metadata read-only.

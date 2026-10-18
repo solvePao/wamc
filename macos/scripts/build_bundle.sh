@@ -75,6 +75,8 @@ python3 "$SCRIPT_DIR/embed_sparkle.py" "$APP_DIR"
 
 if [[ "${WAMC_DISTRIBUTION:-false}" == true ]]; then
     : "${SPARKLE_PUBLIC_KEY:?Missing Sparkle update public key}"
+fi
+if [[ -n "${SPARKLE_PUBLIC_KEY:-}" ]]; then
     /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_PUBLIC_KEY" "$APP_DIR/Contents/Info.plist"
 fi
 

@@ -33,7 +33,7 @@ def verify(app):
             return output.read_bytes(), error.read_text(errors="replace")
 
         def signature(bundle):
-            capture(["codesign", "--verify", "--strict", str(bundle)])
+            capture(["codesign", "--verify", "--deep", "--strict", str(bundle)])
             data, _ = capture(["codesign", "-d", "--entitlements", ":-", str(bundle)])
             entitlements = plistlib.loads(data)
             _, details = capture(["codesign", "-dvv", str(bundle)])

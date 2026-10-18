@@ -100,3 +100,49 @@ extension VirtualCameraDeviceTests {
         XCTAssertFalse(VirtualCameraDevice.sinkIsRegistered(using: FakeCameraDeviceQuery(devices: snapshots)))
     }
 }
+
+extension VirtualCameraDeviceTests {
+    func testNativePropertyReaderDecodesIdsAndRetainedStringsWithoutHardware() throws {
+        var access = CoreMediaIOPropertyAccess()
+        access.dataSize = { _, address, _, _, size in
+            XCTAssertEqual(address?.pointee.mScope, UInt32(kCMIOObjectPropertyScopeGlobal))
+            size?.pointee = 8
+            return noErr
+        }
+        access.data = { _, address, _, _, _, used, output in
+            if address?.pointee.mSelector == UInt32(kCMIODevicePropertyDeviceUID) {
+                output?.assumingMemoryBound(to: Unmanaged<CFString>?.self).pointee =
+                    Unmanaged.passRetained("test-camera" as CFString)
+                used?.pointee = UInt32(MemoryLayout<CFString>.size)
+            } else {
+                let ids = output?.assumingMemoryBound(to: UInt32.self)
+                ids?[0] = 10
+                ids?[1] = 20
+                used?.pointee = 8
+            }
+            return noErr
+        }
+        let reader = CoreMediaIOSystemPropertyReader(access: access)
+        XCTAssertEqual(try reader.objects(for: 1, selector: UInt32(kCMIOHardwarePropertyDevices)), [10, 20])
+        XCTAssertEqual(try reader.string(for: 10, selector: UInt32(kCMIODevicePropertyDeviceUID)), "test-camera")
+    }
+
+    func testNativePropertyReaderHandlesEmptyMalformedAndFailedProperties() throws {
+        var access = CoreMediaIOPropertyAccess()
+        for size: UInt32 in [0, 1] {
+            access.dataSize = { _, _, _, _, output in output?.pointee = size; return noErr }
+            XCTAssertEqual(try CoreMediaIOSystemPropertyReader(access: access).objects(for: 1, selector: 1), [])
+        }
+        access.dataSize = { _, _, _, _, _ in -1 }
+        XCTAssertThrowsError(try CoreMediaIOSystemPropertyReader(access: access).objects(for: 1, selector: 1)) {
+            XCTAssertTrue($0.localizedDescription.contains("OSStatus -1"))
+        }
+        access.dataSize = { _, _, _, _, output in output?.pointee = 4; return noErr }
+        access.data = { _, _, _, _, _, _, _ in -2 }
+        let failed = CoreMediaIOSystemPropertyReader(access: access)
+        XCTAssertThrowsError(try failed.objects(for: 1, selector: 1))
+        XCTAssertThrowsError(try failed.string(for: 1, selector: 1))
+        access.data = { _, _, _, _, _, _, _ in noErr }
+        XCTAssertNil(try CoreMediaIOSystemPropertyReader(access: access).string(for: 1, selector: 1))
+    }
+}

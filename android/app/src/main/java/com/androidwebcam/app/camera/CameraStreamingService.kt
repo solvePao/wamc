@@ -279,6 +279,11 @@ class CameraStreamingService : Service() {
         wantW: Int, wantH: Int, wantFps: Int = 30,
         wantQuality: StreamQuality = StreamQuality.BEST,
     ): Boolean {
+        if (com.androidwebcam.app.update.AndroidUpdates.get(this).installationInProgress) {
+            pendingStart = null
+            emitStatus("Finish the update installation before starting streaming.")
+            return false
+        }
         if (!streaming && CameraStartPolicy.remoteStartDecision(activityVisible) != RemoteStartDecision.START) {
             pendingStart = PendingStart(wantW, wantH, wantFps, wantQuality)
             emitStatus(CameraStartPolicy.OPEN_APP_STATUS)
@@ -564,12 +569,7 @@ class CameraStreamingService : Service() {
                     fields["height"]?.toIntOrNull() ?: height,
                     fields["fps"]?.toIntOrNull() ?: fps,
                     quality)
-                if (streaming || CameraStartPolicy.remoteStartDecision(activityVisible) == RemoteStartDecision.START) {
-                    startStreaming(requested.width, requested.height, requested.fps, requested.quality)
-                } else {
-                    pendingStart = requested
-                    emitStatus(CameraStartPolicy.OPEN_APP_STATUS)
-                }
+                startStreaming(requested.width, requested.height, requested.fps, requested.quality)
             }
             "stop" -> stopStreaming()
             "requestKeyframe" -> {

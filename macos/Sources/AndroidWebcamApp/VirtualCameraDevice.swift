@@ -60,7 +60,19 @@ struct CoreMediaIODeviceQuery: CameraDeviceQuery {
     }
 }
 
-private struct CoreMediaIOSystemPropertyReader: CoreMediaIOPropertyReading {
+/// The system API boundary; tests supply property data without physical cameras.
+struct CoreMediaIOPropertyAccess {
+    var dataSize = CMIOObjectGetPropertyDataSize
+    var data = CMIOObjectGetPropertyData
+}
+
+struct CoreMediaIOSystemPropertyReader: CoreMediaIOPropertyReading {
+    private let access: CoreMediaIOPropertyAccess
+
+    init(access: CoreMediaIOPropertyAccess = CoreMediaIOPropertyAccess()) {
+        self.access = access
+    }
+
     func objects(for object: UInt32, selector: UInt32) throws -> [UInt32] {
         try readObjects(CMIOObjectID(object), selector: selector).map { UInt32($0) }
     }
@@ -72,14 +84,14 @@ private struct CoreMediaIOSystemPropertyReader: CoreMediaIOPropertyReading {
     private func readObjects(_ object: CMIOObjectID, selector: UInt32) throws -> [CMIOObjectID] {
         var address = propertyAddress(selector)
         var size: UInt32 = 0
-        let sizeStatus = CMIOObjectGetPropertyDataSize(object, &address, 0, nil, &size)
+        let sizeStatus = access.dataSize(object, &address, 0, nil, &size)
         guard sizeStatus == noErr else { throw CoreMediaIOQueryError(status: sizeStatus) }
         guard size > 0 else { return [] }
 
         let count = Int(size) / MemoryLayout<CMIOObjectID>.size
         guard count > 0 else { return [] }
         var values = [CMIOObjectID](repeating: 0, count: count)
-        let readStatus = CMIOObjectGetPropertyData(object, &address, 0, nil, size, &size, &values)
+        let readStatus = access.data(object, &address, 0, nil, size, &size, &values)
         guard readStatus == noErr else { throw CoreMediaIOQueryError(status: readStatus) }
         return values
     }
@@ -88,7 +100,7 @@ private struct CoreMediaIOSystemPropertyReader: CoreMediaIOPropertyReading {
         var address = propertyAddress(selector)
         var size = UInt32(MemoryLayout<CFString>.size)
         var value: Unmanaged<CFString>?
-        let status = CMIOObjectGetPropertyData(object, &address, 0, nil, size, &size, &value)
+        let status = access.data(object, &address, 0, nil, size, &size, &value)
         guard status == noErr else { throw CoreMediaIOQueryError(status: status) }
         return value?.takeRetainedValue() as String?
     }

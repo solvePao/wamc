@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import AVFoundation
 import CoreVideo
+import CoreMediaIO
 import XCTest
 @testable import AndroidWebcamAppRuntime
 
@@ -166,5 +167,91 @@ extension PreviewBridgeTests {
         host.layoutSubtreeIfNeeded()
         PreviewView.dismantleNSView(host, coordinator: ())
         XCTAssertEqual(host.frame.width, 320)
+    }
+}
+
+extension PreviewBridgeTests {
+    func testNativeSinkDiscoversOnlyWamcAndBalancesQueueSampleOwnership() throws {
+        var queue: CMSimpleQueue?
+        XCTAssertEqual(CMSimpleQueueCreate(allocator: kCFAllocatorDefault, capacity: 1, queueOut: &queue), noErr)
+        let samples = try XCTUnwrap(queue)
+        var operations = CoreMediaIOStreamAccess()
+        var started: [UInt32] = []
+        var stopped: [UInt32] = []
+        operations.copyQueue = { stream, callback, _, output in
+            XCTAssertEqual(stream, 12)
+            output?.pointee = Unmanaged.passRetained(samples)
+            callback?(1, nil, nil)
+            return noErr
+        }
+        operations.start = { _, stream in started.append(stream); return noErr }
+        operations.stop = { _, stream in stopped.append(stream); return noErr }
+        let sink = CoreMediaIOExtensionSink(reader: SinkPropertyReader(), streams: operations)
+        let sample = try makeSample()
+        if case .unavailable = sink.enqueue(sample) {} else { XCTFail("Disconnected sink must reject frames") }
+        sink.discover()
+        sink.discover()
+        XCTAssertEqual(started, [12], "Discovery must not start an already active stream twice")
+        XCTAssertTrue(sink.available)
+        XCTAssertEqual(sink.connectedStreamName, "Android Camera Sink")
+        if case .accepted = sink.enqueue(sample) {} else { XCTFail("Available queue must accept a frame") }
+        if case .full = sink.enqueue(sample) {} else { XCTFail("Queue capacity must be respected") }
+        let retained = try XCTUnwrap(CMSimpleQueueDequeue(samples))
+        XCTAssertTrue(Unmanaged<CMSampleBuffer>.fromOpaque(retained).takeRetainedValue() === sample)
+        sink.disconnect()
+        XCTAssertEqual(stopped, [12])
+        XCTAssertFalse(sink.available)
+        XCTAssertNil(sink.connectedStreamName)
+    }
+
+    func testNativeSinkHandlesDiscoveryQueueStartAndEnqueueFailures() throws {
+        let sample = try makeSample()
+        let missing = CoreMediaIOExtensionSink(reader: SinkPropertyReader(failSystem: true))
+        missing.discover()
+        XCTAssertFalse(missing.available)
+        var operations = CoreMediaIOStreamAccess()
+        operations.copyQueue = { _, _, _, _ in -1 }
+        let noQueue = CoreMediaIOExtensionSink(reader: SinkPropertyReader(), streams: operations)
+        noQueue.discover()
+        XCTAssertFalse(noQueue.available)
+        operations.copyQueue = { _, _, _, _ in noErr }
+        let emptyQueue = CoreMediaIOExtensionSink(reader: SinkPropertyReader(), streams: operations)
+        emptyQueue.discover()
+        XCTAssertFalse(emptyQueue.available)
+        var queue: CMSimpleQueue?
+        XCTAssertEqual(CMSimpleQueueCreate(allocator: kCFAllocatorDefault, capacity: 1, queueOut: &queue), noErr)
+        let samples = try XCTUnwrap(queue)
+        operations.copyQueue = { _, _, _, output in output?.pointee = Unmanaged.passRetained(samples); return noErr }
+        operations.start = { _, _ in -1 }
+        let failedStart = CoreMediaIOExtensionSink(reader: SinkPropertyReader(), streams: operations)
+        failedStart.discover()
+        XCTAssertFalse(failedStart.available)
+        operations.start = { _, _ in noErr }
+        operations.stop = { _, _ in noErr }
+        operations.enqueue = { _, _ in -1 }
+        let failedEnqueue = CoreMediaIOExtensionSink(reader: SinkPropertyReader(), streams: operations)
+        failedEnqueue.discover()
+        if case .failed = failedEnqueue.enqueue(sample) {} else { XCTFail("Native enqueue error must be reported") }
+        XCTAssertEqual(CMSimpleQueueGetCount(samples), 0)
+        failedEnqueue.disconnect()
+    }
+}
+
+private struct SinkPropertyReader: CoreMediaIOPropertyReading {
+    var failSystem = false
+    func objects(for object: UInt32, selector: UInt32) throws -> [UInt32] {
+        if object == UInt32(kCMIOObjectSystemObject) {
+            if failSystem { throw NSError(domain: "CMIO.Test", code: -1) }
+            return [10, 20]
+        }
+        if object == 20 { throw NSError(domain: "CMIO.Test", code: -2) }
+        return [11, 12, 13]
+    }
+    func string(for object: UInt32, selector: UInt32) throws -> String? {
+        switch object {
+        case 11: return "OBS Virtual Camera Sink"
+        case 12: return "Android Camera Sink"
+        default: return nil
+        }
     }
 }
